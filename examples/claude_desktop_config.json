@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "tkgm-parsel": {
+      "command": "python3",
+      "args": ["<PROJE_YOLU>/server.py"],
+      "env": {
+        "TKGMPARSEL_CIKTI": "<PROJE_YOLU>/cikti",
+        "TKGMPARSEL_CACHE": "<PROJE_YOLU>/cache"
+      }
+    }
+  }
+}
