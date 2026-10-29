@@ -2,11 +2,11 @@ name: test
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
   offline-test:
-    name: offline test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -17,5 +17,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Sema + projeksiyon + DXF testleri (ag yok)
+      - name: Offline testler (ag yok)
         run: python test_mcp.py --offline

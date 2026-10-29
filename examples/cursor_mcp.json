@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "tkgm-parsel": {
-      "command": "python3",
-      "args": ["<PROJE_YOLU>/server.py"]
-    }
-  }
-}

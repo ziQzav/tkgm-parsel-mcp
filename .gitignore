@@ -1,18 +1,7 @@
-# çıktılar ve önbellek
 cache/
 cikti/
-
-# Python
+arastirma/
 __pycache__/
-*.py[cod]
-*.pyo
+*.pyc
 .venv/
-venv/
-.pytest_cache/
-
-# işletim sistemi / editör
 .DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.swp

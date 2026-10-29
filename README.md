@@ -1,327 +1,216 @@
-# tkgm-parsel-mcp
+# mcp-parsel-imar — TKGM parsel + imar durumu (tek MCP sunucusu)
 
-TKGM parsel sorgu sitesinin (`https://parselsorgu.tkgm.gov.tr/`) kullandığı
-`cbsapi.tkgm.gov.tr` uçlarını saran, **salt okunur** bir MCP (Model Context Protocol)
-sunucusu. Türkiye kadastral parsellerini sorgular, GeoJSON ve **CAD için DXF** üretir.
+İki ayrı MCP'yi tek stdio sunucusunda birleştirir:
 
-Harici bağımlılık **yoktur**: Python 3.8+ standart kütüphanesi yeterlidir.
-Projeksiyon (TUREF/ITRF96 3° Transverse Mercator) saf Python ile yazılmıştır — pyproj/PROJ gerekmez.
+- **TKGM kadastro** (7 araç): il/ilçe/mahalle listeleri, ada/parsel sorgusu, koordinattan parsel, DXF (EPSG 5253–5262, saf stdlib TM).
+- **e-İmar** (4 araç): Netcad KEOS tabanlı 20 ilin **13'ünde** ada/parsel ile imar durumu (emsal, TAKS, KAKS, kat, nizam, H, çekme, plan notu).
+- **Birleşik** (1 araç): `parsel_imar` — tek çağrıda TKGM + imar + **IMAR katmanlı DXF**.
 
-> ⚠️ Resmî ve dokümante bir API değildir. Site arayüzü değişirse kırılabilir.
+Harici bağımlılık **yoktur**: Python 3.8+ standart kütüphanesi. Resmî API değildir; portalların kendi uçları kullanılır.
 
-![Örnek DXF önizleme](docs/onizleme_rize_1895_4_tm.png)
+## Çalışan iller (13) — hepsi Netcad KEOS e-İmar
 
-*Rize/Merkez/Hamidiye 1895/4 — `crs=tm` çıktısı (EPSG:5258), köşe numaraları ve alan etiketiyle.*
+İmar sorgusu, il belediyelerinin **Netcad KEOS** (bazılarında BELNET/e-Belediye adıyla) imar modülünden okunur.
+Aynı servis ailesi, il bazında farklı URL ve HTML tablosu kullanır; tek adaptör + il config ile çözülür.
+`svc_nonce` cookie'si ile `X-Service-Nonce` header'ı eşit olmalıdır (yoksa HTTP 403).
+
+| # | İl | KEOS portalı | Not |
+|---|---|---|---|
+| 1 | Amasya | `keos.amasya.bel.tr/imardurumu` | — |
+| 2 | Burdur | `keos.burdur.bel.tr:444/imardurumu` | — |
+| 3 | Diyarbakır | `cbs.diyarbakir.bel.tr/imardurumu` | bazı parsellerde plan yok |
+| 4 | Isparta | `keos.isparta.bel.tr/imardurumu` | bazı parsellerde plan yok |
+| 5 | Kırşehir | `keos.kirsehir.bel.tr/imardurumu` | http |
+| 6 | Nevşehir | `keos.nevsehir.bel.tr/imardurumu` | sertifika zinciri doğrulanamıyor (hosta özel) |
+| 7 | Niğde | `keos.nigde.bel.tr/imardurumu` | — |
+| 8 | Rize | `keos.rize.bel.tr:444/imardurumu` | — |
+| 9 | Sivas | `keos.sivas.bel.tr/imardurumu` | sertifika zinciri doğrulanamıyor (hosta özel) |
+| 10 | Tunceli | `cbs.tunceli.bel.tr/imardurumu` | http |
+| 11 | Şanlıurfa | `keos.sanliurfa.bel.tr/imardurumu` | ISO-8859-9 |
+| 12 | Uşak | `keos.usak.bel.tr/imardurumu` | — |
+| 13 | Aksaray | `ebelediye.aksaray.bel.tr:444/imardurumu` | ISO-8859-9 |
+
+**Kapsam dışı (7):** Adana ve Samsun (kurumsal giriş), Giresun (bakımda), Kahramanmaraş (reCAPTCHA), Tokat (imar modülü 404), Van (HTTP 503), Hatay (imar sayfası yanıt vermiyor).
+Bu illerde `parsel_imar` yine TKGM kadastro verisini döndürür; imar alanında `hata_tipi: "imar_kapsam_disi"` + engel + portal linki bulunur. Giriş yapılmaz, captcha çözülmez.
+
+![IMAR katmanlı DXF](docs/onizleme_rize_imar.png)
 
 ---
-
-## Araçlar (7)
-
-| Araç | Parametreler | Döndürdüğü |
-|---|---|---|
-| `iller_listele` | — | 81 il: `[{id, ad}]` (id = plaka kodu, Adana 23) |
-| `ilceler_listele` | `il_id` | İlçeler: `[{id, ad}]` |
-| `mahalleler_listele` | `ilce_id` | Mahalleler: `[{id, ad}]` |
-| `parsel_sorgula` | `mahalle_id, ada, parsel` | Özet (il/ilçe/mahalle, alan m², nitelik, koordinat sayısı) + `cikti/<Mahalle>_<Ada>_<Parsel>.geojson` |
-| `parsel_bul` | `il_adi, ilce_adi, mahalle_adi, ada, parsel` | İsimden id çözer, sonra sorgular (en çok kullanılan) |
-| `parsel_sorgula_koordinat` | `lat, lon` (WGS84) | O noktadaki kadastral parsel |
-| `parsel_dxf` | `il_adi, ilce_adi, mahalle_adi` **veya** `mahalle_id` + `ada, parsel` + `crs` | DXF dosyası (`tm` / `wgs84` / `both`) + EPSG, alan, koordinat özeti |
-
-Adlar Türkçe karakterli veya ASCII olabilir (`Çankaya` = `Cankaya`); kısmi ad tek eşleşiyorsa kabul edilir.
 
 ## Kurulum
 
 ```bash
 git clone https://github.com/ziQzav/tkgm-parsel-mcp.git
 cd tkgm-parsel-mcp
-python3 --version        # 3.8 veya üzeri
+python3 --version        # 3.8+
+python3 server.py         # stdio, satır bazlı JSON-RPC 2.0
 ```
 
-Kurulum adımı, `pip install`, sanal ortam gerekmez. Sunucuyu doğrudan çalıştırabilirsiniz:
+Kurulum adımı yok: `pip install` veya sanal ortam gerekmez.
 
-```bash
-python3 server.py        # stdin/stdout üzerinden JSON-RPC 2.0 bekler
-```
-
-Sunucu stdio üzerinden **satır bazlı JSON-RPC 2.0** konuşur (Content-Length başlığı yok).
-Günlük mesajlar `stderr`'e yazılır, `stdout` yalnızca JSON-RPC taşır.
-
-Varsayılan çalışma dizinleri script'in yanındadır ve ortam değişkeniyle değiştirilebilir:
-
-| Değişken | Varsayılan | İçerik |
-|---|---|---|
-| `TKGMPARSEL_CIKTI` | `./cikti` | üretilen `.geojson` ve `.dxf` dosyaları |
-| `TKGMPARSEL_CACHE` | `./cache` | il/ilçe/mahalle listeleri ve parsel yanıtı önbelleği |
-
-## İstemci kurulumu
-
-> **Mutlak yol uyarısı:** `server.py`'nin bulunduğu **tam yolu** kendiniz yazmalısınız.
-> Aşağıdaki bloklarda `/PROJE/YOLU/server.py` yer tutucudur; `pwd` ile öğrenin.
-> Projeyi taşırsanız istemci ayarını da güncellemeniz gerekir.
-
-### Claude Desktop
-
-Dosya: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS),
-`%APPDATA%\Claude\claude_desktop_config.json` (Windows),
-`~/.config/Claude/claude_desktop_config.json` (Linux).
+MCP istemci yapılandırması (yol sizin makinenize göre):
 
 ```json
 {
   "mcpServers": {
-    "tkgm-parsel": {
+    "parsel-imar": {
       "command": "python3",
-      "args": ["/PROJE/YOLU/server.py"],
+      "args": ["/PROJE/YOLU/tkgm-parsel-mcp/server.py"],
       "env": {
-        "TKGMPARSEL_CIKTI": "/PROJE/YOLU/cikti",
-        "TKGMPARSEL_CACHE": "/PROJE/YOLU/cache"
+        "PARSELIMAR_CIKTI": "/PROJE/YOLU/tkgm-parsel-mcp/cikti",
+        "PARSELIMAR_CACHE": "/PROJE/YOLU/tkgm-parsel-mcp/cache"
       }
     }
   }
 }
 ```
 
-Değişiklikten sonra Claude Desktop'ı tamamen kapatıp açın.
-
-### Claude Code
-
-```bash
-claude mcp add tkgm-parsel -- python3 /PROJE/YOLU/server.py
-```
-
-Kontrol: `claude mcp list`
-
-### Cursor
-
-Dosya: `~/.cursor/mcp.json` (veya proje içinde `.cursor/mcp.json`).
-
-```json
-{
-  "mcpServers": {
-    "tkgm-parsel": {
-      "command": "python3",
-      "args": ["/PROJE/YOLU/server.py"]
-    }
-  }
-}
-```
-
-### OpenCode
-
-Dosya: `opencode.json` (proje kökü) veya `~/.config/opencode/opencode.json`.
+OpenCode karşılığı:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "tkgm-parsel": {
+    "parsel-imar": {
       "type": "local",
-      "command": ["python3", "/PROJE/YOLU/server.py"],
+      "command": ["python3", "/PROJE/YOLU/tkgm-parsel-mcp/server.py"],
       "enabled": true
     }
   }
 }
 ```
 
-### VS Code
+---
 
-Dosya: `.vscode/mcp.json` (çalışma alanı) — aynı yapı `settings.json` içinde
-`"mcp": { "servers": { ... } }` olarak da kullanılabilir.
+## Araçlar (12)
 
-```json
-{
-  "servers": {
-    "tkgm-parsel": {
-      "type": "stdio",
-      "command": "python3",
-      "args": ["/PROJE/YOLU/server.py"]
-    }
-  }
-}
-```
+| Araç | Parametreler | Döndürdüğü |
+|---|---|---|
+| `iller_listele` | — | 81 il (plaka kodu id) |
+| `ilceler_listele` | `il_id` | TKGM ilçeleri |
+| `mahalleler_listele` | `ilce_id` | TKGM mahalleleri |
+| `parsel_sorgula` | `mahalle_id, ada, parsel` | TKGM özeti + GeoJSON |
+| `parsel_bul` | `il_adi, ilce_adi, mahalle_adi, ada, parsel` | İsimden id çözer + özet |
+| `parsel_sorgula_koordinat` | `lat, lon` | Noktadaki kadastral parsel |
+| `parsel_dxf` | `…, crs: tm\|wgs84\|both` | DXF (PARSEL + PARSEL_ETIKET) |
+| `imar_iller_listele` | — | 20 il: durum, portal, engel notu |
+| `imar_ilceler_listele` | `il` | Portalın ilçe listesi |
+| `imar_mahalleler_listele` | `il, ilce` | İdari + tapu mahalleleri |
+| `imar_sorgula` | `il, ilce, mahalle, ada, parsel` | İmar kaydı (tek portal) |
+| `parsel_imar` | `il, ilce, mahalle, ada, parsel, dxf=true, crs="tm"` | **TKGM + imar + DXF tek çağrıda** |
 
-### Genel (JSON)
+`parsel_imar` imar bulamazsa TKGM verisini yine döndürür; imar alanında
+`hata_tipi: "imar_kapsam_disi"` + `engel` (giris_gerekli / captcha / bakimda / …) + portal linki olur.
 
-`command` + `args` alanlarını destekleyen her MCP istemcisi için:
+## Gerçek örnekler (2026-10-29 ölçümü)
 
-```json
-{
-  "mcpServers": {
-    "tkgm-parsel": {
-      "command": "python3",
-      "args": ["/PROJE/YOLU/server.py"]
-    }
-  }
-}
-```
-
-Hazır dosyalar: `examples/claude_desktop_config.json`, `examples/opencode.json`,
-`examples/cursor_mcp.json`.
-
-## Kullanım örnekleri
-
-İstemcinize doğal dille yazabilirsiniz:
-
-- “Rize Merkez Hamidiye 1895/4 parselini sorgula.”
-- “Ankara Çankaya Küçükesat 2531/7 parselinin DXF'ini üret, crs=tm.”
-- “39.9075, 32.8620 koordinatındaki parseli bul.”
-- “Adana'nın ilçelerini listele.” → `ilceler_listele(23)`
-- “Kadıköy'deki mahalleleri göster.” → önce il/ilçe id'si çözülür
-
-Elle JSON-RPC denemesi:
-
-```bash
-printf '%s\n' \
- '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cli","version":"1"}}}' \
- '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"parsel_bul","arguments":{"il_adi":"Rize","ilce_adi":"Merkez","mahalle_adi":"Hamidiye","ada":"1895","parsel":"4"}}}' \
- | python3 server.py
-```
-
-Daha fazlası: [`examples/ornek_sorgu.md`](examples/ornek_sorgu.md)
-
-### Örnek DXF çıktısı
+**Rize / Merkez / Tophane 157/59**
 
 ```json
 {
-  "parsel": {"il": "Rize", "ilce": "Merkez", "mahalle": "Hamidiye Köyü", "mahalle_id": 123992, "ada": "1895", "parsel": "4"},
-  "alan_m2": 2372.25,
-  "koordinat_sayisi": 9,
-  "dosyalar": [
-    {"dosya": "cikti/Hamidiye_Köyü_1895_4_tm.dxf", "crs": "TUREF / TM42 (ITRF96, 3 derece Gauss-Kruger)",
-     "epsg": 5258, "birim": "metre", "kapali": true, "merkez_boylam": 42.0, "alan_hesap_m2": 2389.14},
-    {"dosya": "cikti/Hamidiye_Köyü_1895_4_wgs84.dxf", "epsg": 4326, "birim": "derece", "kapali": true}
-  ]
+  "tkgm": {"alan_m2": 640.26, "nitelik": "Kargir Ev Ve Arsası", "koordinat_sayisi": 9},
+  "imar": {"plan_adi": "RİZE (MERKEZ) REVİZYON UYGULAMA İMAR PLANI",
+           "emsal": 3.0, "kaks": 3.0, "taks": null, "bina_yuksekligi_m": 30.5,
+           "kullanim_karari": "Yerleşik Konut Alanı", "durum": "ok"},
+  "dxf": {"dosya": "cikti/Tophane_157_59_tm.dxf", "epsg": 5258, "imar_katmani": true}
 }
 ```
 
-## DXF ve koordinat sistemleri
+**Aksaray / Merkez / Kılıçarslan 668/214**
 
-`parsel_dxf` çıktısı **AutoCAD R12 (AC1009) ASCII DXF**'tir; DWG üretilmez.
-DXF'i AutoCAD, LibreCAD, QCAD, BricsCAD, DWG TrueView vb. açar.
+```json
+{
+  "tkgm": {"alan_m2": 551.29, "nitelik": "5 Katlı Betonarme Apartman Ve Arsası"},
+  "imar": {"plan_adi": "AKSARAY 1/1000 OLÇEKLI REVIZYON UYGULAMA IMAR PLANI",
+           "emsal": 1.8, "kaks": 1.8, "taks": 0.4, "kat_sayisi": 4,
+           "yapi_nizami": "A", "kullanim_karari": "Konut Alanı"},
+  "dxf": {"dosya": "cikti/Kiliçarslan_668_214_tm.dxf", "epsg": 5255, "imar_katmani": true}
+}
+```
 
-| `crs` | Dosya | EPSG | Birim |
-|---|---|---|---|
-| `tm` (varsayılan) | `<Mahalle>_<Ada>_<Parsel>_tm.dxf` | TUREF/TM27…TM54 (5253–5262), zondan otomatik | metre |
-| `wgs84` | `<Mahalle>_<Ada>_<Parsel>_wgs84.dxf` | 4326 | **derece** |
-| `both` | iki dosya | 5253–5262 + 4326 | metre + derece |
+Diğer doğrulananlar: **Tunceli** 276/9 → emsal 1,20 · H 16,5 m; **Niğde** 104/5 → emsal 0,10 · TAKS 0,05 · kat 2;
+**Burdur** 412/20 → kat 2 · nizam BİTİŞİK; **Amasya** 2061/13 → plan + açıklama notu.
 
-### EPSG tablosu (TUREF / ITRF96, 3° Transverse Mercator)
+## 20 il kapsam matrisi
 
-| Merkez boylam | Dilim | EPSG | Örnek il |
-|---|---|---|---|
-| 27°E | TM27 | 5253 | İzmir, Çanakkale |
-| 30°E | TM30 | 5254 | Antalya, Bursa |
-| 33°E | TM33 | 5255 | Ankara, Konya |
-| 36°E | TM36 | 5256 | Adana, Kayseri |
-| 39°E | TM39 | 5257 | Samsun, Trabzon |
-| 42°E | TM42 | 5258 | **Rize**, Erzurum |
-| 45°E | TM45 | 5259 | Van, Iğdır |
-| 48°E | TM48 | 5260 | (doğu sınırı) |
-| 51°E | TM51 | 5261 | (doğu sınırı) |
-| 54°E | TM54 | 5262 | (doğu sınırı) |
+Ölçüm: 2026-10-29, tek parsel/il, seri istek (≥500 ms). "Nonce" = `svc_nonce` cookie == `X-Service-Nonce` header zorunlu mu.
 
-Kural: `zon = round(boylam / 3)`, `merkez boylam = 3 × zon`,
-`EPSG = 5253 + (merkez boylam − 27) / 3`.
-Örnekler: **Rize 40,61°E → TM42 → EPSG:5258**; **Ankara 32,86°E → TM33 → EPSG:5255**.
+| # | İl | Portal | Nonce | imar.aspx tablosu | Ada/parsel | Durum |
+|---|---|---|---|---|---|---|
+| 1 | Adana | keos.adana.bel.tr/BELNET | — | — | — | 🔴 giriş gerekli (kurumsal login) |
+| 2 | Amasya | keos.amasya.bel.tr/imardurumu | ✔ | ✔ | 2061/13 | 🟢 aktif |
+| 3 | Burdur | keos.burdur.bel.tr:444/imardurumu | ✔ | ✔ | 412/20 | 🟢 aktif |
+| 4 | Diyarbakır | cbs.diyarbakir.bel.tr/imardurumu | ✔ | ✔ | 150/4 | 🟢 aktif (parselde plan yok: "Nazım İmar Planı Mevcut Değil") |
+| 5 | Giresun | keos.giresun.bel.tr/imardurumu | ✔ | ✖ (maintenance.aspx) | — | 🔴 bakımda |
+| 6 | Hatay | keos.hatay.bel.tr/imardurumu | ✖ | ✖ (45 sn timeout) | — | 🔴 imar sayfası yanıt vermiyor |
+| 7 | Isparta | keos.isparta.bel.tr/imardurumu | ✔ | ✔ | 140/29 | 🟢 aktif (parselde plan yok) |
+| 8 | Kırşehir | keos.kirsehir.bel.tr/imardurumu (http) | ✔ | ✔ | 363/147 | 🟢 aktif |
+| 9 | Kahramanmaraş | keos.kahramanmaras.bel.tr/imardurumu | ✔ | ✖ (recaptcha.aspx) | — | 🔴 captcha |
+| 10 | Nevşehir | keos.nevsehir.bel.tr/imardurumu | ✔ | ✔ | 3435/350 | 🟢 aktif (TLS: sertifika zinciri doğrulanamıyor, hosta özel `CERT_NONE`) |
+| 11 | Niğde | keos.nigde.bel.tr/imardurumu | ✔ | ✔ | 104/5 | 🟢 aktif |
+| 12 | Rize | keos.rize.bel.tr:444/imardurumu | ✔ | ✔ | 157/59 | 🟢 aktif |
+| 13 | Samsun | cbs.samsun.bel.tr/BELNET | — | — | — | 🔴 giriş gerekli |
+| 14 | Sivas | keos.sivas.bel.tr/imardurumu | ✔ | ✔ | 6481/1 | 🟢 aktif (hosta özel `CERT_NONE`) |
+| 15 | Tokat | keos.tokat.bel.tr | — | — | — | 🔴 imar modülü 404 |
+| 16 | Tunceli | cbs.tunceli.bel.tr/imardurumu (http) | ✔ | ✔ | 276/9 | 🟢 aktif |
+| 17 | Şanlıurfa | keos.sanliurfa.bel.tr/imardurumu | ✖ | ✔ | 107/3 | 🟢 aktif (ISO-8859-9) |
+| 18 | Uşak | keos.usak.bel.tr/imardurumu | ✔ | ✔ | 1109/7 | 🟢 aktif |
+| 19 | Van | cbs.van.bel.tr/keos | — | — | — | 🔴 HTTP 503 |
+| 20 | Aksaray | ebelediye.aksaray.bel.tr:444/imardurumu | ✖ | ✔ | 668/214 | 🟢 aktif (ISO-8859-9) |
 
-Projeksiyon parametreleri (EPSG'den): GRS80 elipsoidi, lat_0 = 0, k = 1,0,
-false easting = 500000, false northing = 0. xn = doğu (easting), yn = kuzey (northing).
+**13 aktif / 7 kapsam dışı.** Kapsam dışı iller için `parsel_imar` yine TKGM verisini döndürür, imar alanında engel + portal linki verir; uydurma veri üretilmez.
 
-Doğruluk: pyproj (PROJ) ile en büyük fark **0,16 mm**, WGS84→TM→WGS84 round-trip **0,06 mm**,
-TM → WGS84 ters dönüşüm **< 1e-9 derece**.
+### Farklı HTML şablonları
 
-### DXF yapısı
+Aynı KEOS servisi il bazında farklı tablo etiketleri kullanıyor; alan eşlemesi etiket sözlüğüyle yapılıyor:
 
-| Öğe | Değer |
+| Şablon | Etiket örnekleri | İller |
+|---|---|---|
+| A (klasik) | `Mer'i İmar Planı`, `Fonksiyon`, `T.A.K.S`, `K.A.K.S (Emsal)`, `Bina Yüksekliği` | Amasya, Kırşehir, Rize, Tunceli, Şanlıurfa |
+| B (yeni) | `YÜRÜRLÜKTEKİ İMAR PLANI` (bölüm başlığı), `Plan Fonksiyonu`, `Yükseklik`, `T.A.K.S.`, `Ada / Parsel` | Burdur, Diyarbakır, Isparta, Uşak |
+| C | `Fonksiyon Adı`, `Plan Onama Tarihi` | Niğde |
+| D | `Meri İmar Planı`, `Kroki Ölçeği`, `İdari Mahallesi` | Sivas |
+| E | `Plan Fonksiyon`, `Plan Onay Tarih/Sayısı` | Aksaray |
+| F | `KMLDOWNLOAD`, `Mer'i İmar Planı / Tadilatın Konusu` | Nevşehir |
+
+## DXF ve IMAR katmanı
+
+`crs=tm` (varsayılan) / `wgs84` / `both`. Katmanlar:
+
+| Katman | İçerik |
 |---|---|
-| Sürüm | `AC1009` (R12 ASCII), `$DWGCODEPAGE = ANSI_1254` |
-| Katmanlar | `PARSEL` (geometri), `PARSEL_ETIKET` (yazılar) |
-| Geometri | Kapalı `POLYLINE` (`70=1`), köşe başına `VERTEX`, ardından `SEQEND` |
-| Etiketler | Her köşede sıra numarası, merkezde `ada/parsel` + kayıt alanı (`1895/4  2372.25 m2`) |
-| Hassasiyet | metre: 3 ondalık (mm); derece: 8 ondalık (~1 mm) |
+| `PARSEL` | kapalı `POLYLINE` (AutoCAD R12, AC1009) |
+| `PARSEL_ETIKET` | köşe numaraları + merkezde `ada/parsel  alan m²` |
+| `IMAR` | 4 satır: `Emsal / TAKS / KAKS`, `Plan: …`, `Kullanim: …`, `Kat / H / Nizam` |
 
-**Uyarılar**
+`parsel_imar` IMAR katmanını otomatik ekler; `parsel_dxf` (salt kadastro) eklemez.
 
-- `crs="wgs84"` çıktısında **1 birim = 1 derece**'dir; ölçekli çizim, alan/uzunluk ölçümü için
-  `crs="tm"` kullanın.
-- Alan etiketi TKGM **kayıt** alanıdır. `alan_hesap_m2` alanı, DXF'teki poligonun düzlemdeki
-  geometrik alanıdır; TKGM'nin gösterim geometrisi nedeniyle küçük farklar olabilir
-  (Rize örneği: 2.372,25 m² kayıt, 2.389,14 m² geometri — %0,7).
-- R12 ASCII olduğu için `TEXT` içeriğindeki Türkçe karakterler ASCII'ye çevrilir (ı→i, ğ→g, ş→s).
-- Delik (iç halka) çizilmez; TKGM parsel geometrisi tek halka gelir.
-- **DWG desteklenmez**; DXF'i CAD programında "Save As → DWG" ile çevirebilirsiniz.
+## Davranış
+
+- Seri istek, aralarında **≥500 ms**; tek parsel (toplu tarama yok), 3 deneme, disk önbellek.
+- Önbellek: imar **24 saat**, il/ilçe/mahalle listeleri **7 gün**, ada/parsel eşleşmesi 6 saat, TKGM parsel 1 saat.
+- Hata tipleri: `bulunamadi`, `belirsiz`, `kapsam_disi`, `giris_gerekli`, `captcha`, `bakimda`, `modul_yok`, `erisilemedi`, `zaman_asimi`, `ag_hatasi`.
+- Mahalle eşlemesi: TKGM mahalle adı ile KEOS **tapu mahallesi** farklı olabilir (ör. Rize 46 idari / 113 tapu). Sonuçlarda `mahalle_esleme: {tkgm, keos}` döner; ada/parsel birden fazla mahallede varsa aday listesi verilir.
+- TLS: varsayılan **doğrulama açık**. Yalnız `keos.nevsehir.bel.tr` ve `keos.sivas.bel.tr` için hosta özel `CERT_NONE` (sertifika zinciri eksik); genel bir `CERT_NONE` yok.
 
 ## Testler
 
 ```bash
-python3 test_mcp.py            # --offline (varsayılan): ağ yok
-python3 test_mcp.py --online   # gerçek TKGM sorguları
+python3 test_mcp.py            # --offline: 37 kontrol, ağ yok (fixture + projeksiyon + DXF)
+python3 test_mcp.py --online   # 10 kontrol: gerçek TKGM + 4 ilde gerçek imar
 ```
 
-`--offline` modu ağa hiç çıkmaz: araç şemalarını, TM projeksiyonunu (bilinen koordinat +
-round-trip) ve DXF üretimini depodaki örnek parselle (`tests/fixtures/`) doğrular.
-CI (`.github/workflows/test.yml`) Python 3.8 / 3.10 / 3.12 üzerinde yalnızca offline modu çalıştırır.
+Offline fixture'lar portalların **gerçek** yanıtlarından alındı (Rize, Burdur, Aksaray, Amasya HTML'leri).
 
-## Hata yönetimi ve yük sınırları
+## Sınırlar
 
-- **404** → Türkçe “Parsel bulunamadı: Mahalle Id = …, Ada = …, Parsel = …”.
-- **Ağ hatası** → 3 deneme (artan bekleme), sonra Türkçe hata.
-- İstekler **seri**, aralarında en az **400 ms** gecikme; paralel/agresif istek yok.
-- Önbellek: il/ilçe/mahalle listeleri 7 gün, parsel yanıtları 1 saat.
-
-## Sınırlar ve hukuki not
-
-- **Resmî API değildir.** TKGM siteyi/arayüzü değiştirirse uçlar haber verilmeden kırılabilir.
-- Yalnızca **kadastral parsel geometrisi ve özet nitelikler** döner. **Tapu sahibi, hisse,
-  ipotek, takyidat gibi kişisel/mülkiyet bilgisi yoktur** ve toplanmaz.
-- Veriler bilgilendirme amaçlıdır; **resmî işlemlerde TKGM/tapu kayıtları esastır**. Verinin
-  kullanımından ve sonuçların doğruluğundan kullanıcı sorumludur.
-- **TLS sertifika doğrulaması kapalıdır** (`ssl.CERT_NONE`): TKGM sertifika zinciri bazı
-  ortamlarda doğrulanamıyor. Bu, araya giren (MITM) bir bağlantının fark edilmemesi demektir;
-  hassas/kurumsal ağlarda bunu bilerek kullanın. Sunucu yalnızca herkese açık kadastro
-  verisini okur, kimlik doğrulama veya gizli veri göndermez.
-- Salt okunur: form gönderme, hesap işlemi, yazma yok. Yalnızca `cikti/` ve `cache/` altına yazar.
-
-## Katkı
-
-Issue ve pull request'ler açıktır. Lütfen:
-
-1. `python3 test_mcp.py` (offline) testlerini geçirin.
-2. Yeni uç/araç eklerken README araç tablosunu ve `CHANGELOG.md`'yi güncelleyin.
-3. Ağa çıkan testleri `--online` altında tutun; CI yalnızca offline çalışır.
-
-Hata bildirirken: Python sürümü, işletim sistemi, çalıştırılan araç ve aldığınız hata metnini ekleyin.
+- **Resmî API değil.** Portal/HTML değişirse il bazında kırılabilir; o il `beklenmeyen_yanit`/`bulunamadi` döner, veri uydurulmaz.
+- **7 il kapsam dışı** (yukarıdaki matris): giriş, captcha, bakım, 404, 503, zaman aşımı. Bu illerde hesap açılmaz, captcha çözülmez, e-Devlet girişi yapılmaz.
+- **Veri güncelliği**: sonuç portalın o anki halidir; askı/tadilat süreçleri gecikmeli yansıyabilir. Resmî işlemde belediyeden **imarlı çap** alınmalıdır; kullanım sorumluluğu kullanıcıdadır.
+- **Boş alanlar normaldir**: TAKS/kat/çekme/pafta portalda çoğu parselde `-`; `null` döner.
+- Kişisel veri yok: malik/hisse/takyidat okunmaz; yalnızca parselin imar parametreleri.
+- DWG üretilmez (DXF her CAD programında açılır).
 
 ## Lisans
 
-[MIT](LICENSE) © 2026 ziQzav
-
-## Kaynak URL'ler
-
-- Site: https://parselsorgu.tkgm.gov.tr/
-- İl listesi (plaka kodu): https://parselsorgu.tkgm.gov.tr/app/modules/administrativeQuery/data/ilListe.json
-- İl listesi (GeoJSON): https://cbsapi.tkgm.gov.tr/megsiswebapi.v3.1/api/maksIdariYapi/illiste
-- İlçe: https://cbsapi.tkgm.gov.tr/megsiswebapi.v3.1/api/idariYapi/ilceListe/{ilId}
-- Mahalle: https://cbsapi.tkgm.gov.tr/megsiswebapi.v3.1/api/idariYapi/mahalleListe/{ilceId}
-- Parsel: https://cbsapi.tkgm.gov.tr/megsiswebapi.v3.1/api/parsel/{mahalleId}/{ada}/{parsel}
-- Koordinat: https://cbsapi.tkgm.gov.tr/megsiswebapi.v3.1/api/parsel/{lat}/{lon}/
-
----
-
-# English (short)
-
-Read-only MCP server that wraps the (unofficial) TKGM land-parcel endpoints used by
-`parselsorgu.tkgm.gov.tr`. It queries Turkish cadastral parcels and exports **DXF** for CAD.
-
-- **No dependencies:** Python 3.8+ standard library only, including the TUREF/ITRF96
-  3° Transverse Mercator projection (no pyproj).
-- **7 tools:** `iller_listele`, `ilceler_listele`, `mahalleler_listele`, `parsel_sorgula`,
-  `parsel_bul`, `parsel_sorgula_koordinat`, `parsel_dxf`.
-- **Install:** `git clone`, then point your MCP client at `python3 /ABSOLUTE/PATH/server.py`.
-  Nothing to install.
-- **DXF:** AutoCAD R12 ASCII, closed `POLYLINE` on layer `PARSEL`, vertex numbers and an area
-  label on `PARSEL_ETIKET`. `crs=tm` → TUREF/TM zones (EPSG:5253–5262, metres),
-  `crs=wgs84` → EPSG:4326 (degrees), `crs=both` → two files. Rize 1895/4 → EPSG:5258.
-- **Tests:** `python3 test_mcp.py` (offline, no network) or `--online` (live TKGM).
-- **Limits:** unofficial API that may break; cadastral geometry only — no owner, share or
-  mortgage data; TLS verification is disabled; DWG is not supported (DXF only).
-- **License:** MIT © 2026 ziQzav.
+MIT © 2026 OpenBot ekibi. Kaynak siteler: TKGM (`cbsapi.tkgm.gov.tr`, `parselsorgu.tkgm.gov.tr`) ve il belediyelerinin KEOS e-İmar portalları.

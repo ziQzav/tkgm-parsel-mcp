@@ -21,6 +21,8 @@ import unicodedata
 import urllib.error
 import urllib.request
 
+import imar as imar_mod
+
 BASE = "https://cbsapi.tkgm.gov.tr/megsiswebapi.v3.1/api"
 IL_LIST_URL = "https://parselsorgu.tkgm.gov.tr/app/modules/administrativeQuery/data/ilListe.json"
 
@@ -28,17 +30,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _env_dir(var, default):
-    """TKGMPARSEL_CIKTI / TKGMPARSEL_CACHE ile degistirilebilen calisma dizini."""
     value = os.environ.get(var)
     if value:
         return os.path.abspath(os.path.expanduser(value))
     return os.path.join(HERE, default)
 
 
-OUT_DIR = _env_dir("TKGMPARSEL_CIKTI", "cikti")
-CACHE_DIR = _env_dir("TKGMPARSEL_CACHE", "cache")
+OUT_DIR = _env_dir("PARSELIMAR_CIKTI", "cikti")
+CACHE_DIR = _env_dir("PARSELIMAR_CACHE", "cache")
+IMAR_OUT_DIR = _env_dir("PARSELIMAR_CIKTI", "cikti")
 
-SERVER_NAME = "tkgm-parsel"
+SERVER_NAME = "parsel-imar"
 SERVER_VERSION = "1.0.0"
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -504,6 +506,7 @@ def tm_inverse(east, north, lon0, k0=TM_K0, fe=TM_FE, fn=TM_FN):
 
 DXF_LINE_LAYER = "PARSEL"
 DXF_LABEL_LAYER = "PARSEL_ETIKET"
+DXF_IMAR_LAYER = "IMAR"
 
 
 def _dxf_num(value, nd=3):
@@ -578,7 +581,7 @@ def yaz_dxf(path, halkalar, etiketler=None, ondalik=3):
     """Kapali POLYLINE halkalari + TEXT etiketleri iceren R12 ASCII DXF yazar.
 
     halkalar : [[(x, y), ...], ...]  (kapali kabul edilir, son nokta tekrari atilir)
-    etiketler: [{"x":, "y":, "yazi":, "yukseklik":, "aci":}]
+    etiketler: [{"x":, "y":, "yazi":, "yukseklik":, "aci":, "katman":}]
     ondalik  : koordinat ondalik basamak sayisi (metre=3, derece=8)
     """
     def f(v):
@@ -590,6 +593,9 @@ def yaz_dxf(path, halkalar, etiketler=None, ondalik=3):
         for x, y in ring:
             xs.append(x)
             ys.append(y)
+    for et in etiketler or []:
+        xs.append(float(et.get("x", 0.0)))
+        ys.append(float(et.get("y", 0.0)))
     if not xs:
         raise ApiError("DXF icin geometri yok.")
     extmin = (min(xs), min(ys))
@@ -615,9 +621,10 @@ def yaz_dxf(path, halkalar, etiketler=None, ondalik=3):
         (0, "LTYPE"), (2, "CONTINUOUS"), (70, "0"), (3, "Solid line"),
         (72, "65"), (73, "0"), (40, "0.0"),
         (0, "ENDTAB"),
-        (0, "TABLE"), (2, "LAYER"), (70, "2"),
+        (0, "TABLE"), (2, "LAYER"), (70, "3"),
         (0, "LAYER"), (2, DXF_LINE_LAYER), (70, "0"), (62, "7"), (6, "CONTINUOUS"),
         (0, "LAYER"), (2, DXF_LABEL_LAYER), (70, "0"), (62, "3"), (6, "CONTINUOUS"),
+        (0, "LAYER"), (2, DXF_IMAR_LAYER), (70, "0"), (62, "1"), (6, "CONTINUOUS"),
         (0, "ENDTAB"),
         (0, "ENDSEC"),
     ))
@@ -650,7 +657,7 @@ def yaz_dxf(path, halkalar, etiketler=None, ondalik=3):
                      .replace("Ö", "O").replace("ü", "u").replace("Ü", "U")
                      .replace("²", "2").replace("—", "-"))
         ent += [
-            (0, "TEXT"), (8, DXF_LABEL_LAYER),
+            (0, "TEXT"), (8, label.get("katman") or DXF_LABEL_LAYER),
             (10, f(label.get("x", 0.0))), (20, f(label.get("y", 0.0))), (30, "0.0"),
             (40, f(label.get("yukseklik", 1.0))),
             (1, yazi), (50, _dxf_num(label.get("aci", 0.0))),
@@ -823,14 +830,46 @@ def _parsel_coz(args):
     }
 
 
-def parsel_dxf_uret(feature, cozum, crs="tm", out_dir=None):
-    """Cozulmus bir parsel Feature'indan DXF uretir (ag erisimi yok).
+def _imar_etiketleri(halkalar, imar_kayit, birim):
+    """DXF 'IMAR' katmani: emsal/TAKS/KAKS + plan adi, poligonun altinda."""
+    if not imar_kayit or imar_kayit.get("durum") != "ok":
+        return []
+    xs = [p[0] for r in halkalar for p in r]
+    ys = [p[1] for r in halkalar for p in r]
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    h = max(span * 0.022, 0.5) if birim == "metre" else max(span * 0.022, 0.00002)
 
-    feature : TKGM GeoJSON Feature (geometri WGS84)
-    cozum   : {"il","ilce","mahalle","mahalle_id","ada","parsel"} sozlugu
-    crs     : "tm" | "wgs84" | "both"
-    out_dir : varsayilan OUT_DIR
-    """
+    def fmt(v, son=""):
+        if v is None:
+            return "-"
+        if isinstance(v, float):
+            txt = ("%.2f" % v).rstrip("0").rstrip(".")
+        else:
+            txt = str(v)
+        return txt + son
+
+    satirlar = [
+        "IMAR: Emsal %s | TAKS %s | KAKS %s" % (fmt(imar_kayit.get("emsal")),
+                                                fmt(imar_kayit.get("taks")),
+                                                fmt(imar_kayit.get("kaks"))),
+        "Plan: %s" % (imar_kayit.get("plan_adi") or "-"),
+        "Kullanim: %s" % (imar_kayit.get("kullanim_karari") or "-"),
+        "Kat: %s | H: %s | Nizam: %s" % (fmt(imar_kayit.get("kat_sayisi")),
+                                         fmt(imar_kayit.get("bina_yuksekligi_m"), " m"),
+                                         imar_kayit.get("yapi_nizami") or "-"),
+    ]
+    etiketler = []
+    y = min(ys) - h * 2.0
+    x_orta = (min(xs) + max(xs)) / 2.0
+    for satir in satirlar:
+        etiketler.append({"x": x_orta, "y": y, "yazi": satir,
+                          "yukseklik": h, "katman": DXF_IMAR_LAYER})
+        y -= h * 1.6
+    return etiketler
+
+
+def parsel_dxf_uret(feature, cozum, crs="tm", out_dir=None, imar_kayit=None):
+    """Cozulmus bir parsel Feature'indan DXF uretir (ag erisimi yok)."""
     if crs not in ("tm", "wgs84", "both"):
         raise ApiError("crs 'tm', 'wgs84' veya 'both' olmali (gelen: %s)." % crs)
     hedef = out_dir or OUT_DIR
@@ -847,7 +886,6 @@ def parsel_dxf_uret(feature, cozum, crs="tm", out_dir=None):
                                 safe_name(cozum.get("parsel")))
     os.makedirs(hedef, exist_ok=True)
 
-    # TUM koordinatlarin ortalama boylami -> zon (parsel tek zon icinde kalir)
     tum_noktalar = [pt for ring in halkalar_ll for pt in ring]
     lon_ort = sum(pt[0] for pt in tum_noktalar) / float(len(tum_noktalar))
     lon0 = tm_merkez_boylam(lon_ort)
@@ -862,24 +900,19 @@ def parsel_dxf_uret(feature, cozum, crs="tm", out_dir=None):
             birim = "metre"
             crs_adi = "TUREF / TM%d (ITRF96, 3 derece Gauss-Kruger)" % int(lon0)
             epsg_kodu = epsg
-            olcek = 1.0
             ek = {"merkez_boylam": lon0, "olcek_faktoru": TM_K0, "false_easting": TM_FE}
         else:
             halkalar = [[(lon, lat) for lon, lat in ring] for ring in halkalar_ll]
             birim = "derece"
             crs_adi = "WGS84 (cografi, EPSG:4326)"
             epsg_kodu = 4326
-            olcek = None
             ek = {"uyari": "WGS84 DXF'te 1 birim = 1 derece; olcekli/metrik cizim icin crs='tm' kullanin."}
 
         etiketler = _dxf_etiketleri(halkalar, kimlik, alan_m2, birim)
+        imar_etiket = _imar_etiketleri(halkalar, imar_kayit, birim)
+        etiketler.extend(imar_etiket)
         path = os.path.join(hedef, "%s_%s.dxf" % (dosya_temel, secim))
         yaz_dxf(path, halkalar, etiketler, ondalik=3 if birim == "metre" else 8)
-
-        if birim == "metre":
-            hesaplanan = round(sum(_ring_alan(r) for r in halkalar), 2)
-        else:
-            hesaplanan = None
 
         kayit = {
             "dosya": path,
@@ -890,9 +923,10 @@ def parsel_dxf_uret(feature, cozum, crs="tm", out_dir=None):
             "halka_sayisi": len(halkalar),
             "kapali": True,
             "etiket_sayisi": len(etiketler),
+            "imar_katmani": bool(imar_etiket),
         }
-        if hesaplanan is not None:
-            kayit["alan_hesap_m2"] = hesaplanan
+        if birim == "metre":
+            kayit["alan_hesap_m2"] = round(sum(_ring_alan(r) for r in halkalar), 2)
         kayit.update(ek)
         dosyalar.append(kayit)
 
@@ -902,9 +936,9 @@ def parsel_dxf_uret(feature, cozum, crs="tm", out_dir=None):
         "koordinat_sayisi": koordinat_sayisi,
         "geometri_tipi": (feature.get("geometry") or {}).get("type"),
         "dosyalar": dosyalar,
-        "not": ("DXF = AutoCAD R12 (AC1009) ASCII, katmanlar: %s (kapali POLYLINE), %s (TEXT). "
-                "DWG uretilmez; DXF tum CAD programlarinda acilir."
-                % (DXF_LINE_LAYER, DXF_LABEL_LAYER)),
+        "not": ("DXF = AutoCAD R12 (AC1009) ASCII, katmanlar: %s (kapali POLYLINE), %s (kose/alan "
+                "TEXT), %s (imar etiketleri). DWG uretilmez; DXF tum CAD programlarinda acilir."
+                % (DXF_LINE_LAYER, DXF_LABEL_LAYER, DXF_IMAR_LAYER)),
     }
 
 
@@ -915,6 +949,130 @@ def tool_parsel_dxf(args):
     feature, cozum = _parsel_coz(args)
     return parsel_dxf_uret(feature, cozum, crs)
 
+
+# ---------------------------------------------------------------- imar araclari
+
+KAPSAM_TIPLERI = ("giris_gerekli", "captcha", "bakimda", "modul_yok", "erisilemedi",
+                  "zaman_asimi", "kapsam_disi")
+
+
+def _tkgm_coz(il, ilce, mahalle, ada, parsel):
+    for ad, val in (("il", il), ("ilce", ilce), ("mahalle", mahalle),
+                    ("ada", ada), ("parsel", parsel)):
+        if val is None or str(val).strip() == "":
+            raise ApiError("%s zorunlu (TKGM parsel bilgisi icin)." % ad)
+    il_k = _pick(get_il_listesi(), il, "Il")
+    ilce_k = _pick(get_ilceler(il_k["id"]), ilce, "Ilce")
+    mah_k = _pick(get_mahalleler(ilce_k["id"]), mahalle, "Mahalle")
+    ada, parsel = str(ada).strip(), str(parsel).strip()
+    feature = parsel_sorgula_raw(mah_k["id"], ada, parsel)
+    cozum = {"il": il_k["ad"], "il_id": il_k["id"], "ilce": ilce_k["ad"], "ilce_id": ilce_k["id"],
+             "mahalle": mah_k["ad"], "mahalle_id": mah_k["id"], "ada": ada, "parsel": parsel}
+    return feature, cozum
+
+
+def tool_imar_iller_listele(_args):
+    iller = []
+    for ad in sorted(imar_mod.ILLER, key=imar_mod.fold):
+        cfg = imar_mod.ILLER[ad]
+        iller.append({"il": ad, "durum": cfg.get("durum"),
+                      "portal": cfg.get("base") or cfg.get("url"),
+                      "not": cfg.get("not")})
+    aktif = [i for i in iller if i["durum"] == "aktif"]
+    return {"adet": len(iller), "aktif_adet": len(aktif), "iller": iller,
+            "durum_aciklama": {
+                "aktif": "ada/parsel ile otomatik imar sorgusu calisiyor",
+                "giris_gerekli": "portal kullanici girisi istiyor (hesap acilmaz)",
+                "captcha": "captcha var, otomatik sorgu yapilmaz",
+                "bakimda": "portal bakim sayfasi donduruyor",
+                "modul_yok": "imar modulu bulunamadi (404)",
+                "erisilemedi": "portal yanit vermiyor (503/zaman asimi)",
+                "zaman_asimi": "imar sayfasi yanit vermiyor",
+            },
+            "sorgu_zamani": _ts()}
+
+
+def tool_imar_ilceler_listele(args):
+    il = args.get("il")
+    ad, ilceler = imar_mod.get_ilceler(il)
+    return {"il": ad, "ilceler": ilceler, "adet": len(ilceler), "sorgu_zamani": _ts()}
+
+
+def tool_imar_mahalleler_listele(args):
+    il = args.get("il")
+    ilce = args.get("ilce")
+    ilce_id = None
+    if ilce not in (None, ""):
+        ad, ilceler = imar_mod.get_ilceler(il)
+        es = [i for i in ilceler if imar_mod.fold(i["ad"]) == imar_mod.fold(ilce)]
+        if not es:
+            raise ApiError("%s icin ilce bulunamadi: '%s'. Mevcut: %s"
+                           % (ad, ilce, ", ".join(i["ad"] for i in ilceler)), "bulunamadi")
+        ilce_id = es[0]["id"]
+    ad, mahalleler = imar_mod.get_mahalleler(il, ilce_id)
+    _, tapu = imar_mod.get_tapu_mahalleler(il, ilce_id)
+    return {"il": ad, "ilce": ilce, "mahalleler": mahalleler, "tapu_mahalleler": tapu,
+            "adet": len(mahalleler), "tapu_adet": len(tapu),
+            "not": "Sonuclarda gorunen ad TAPU mahallesidir; iki liste cogunlukla aynidir.",
+            "sorgu_zamani": _ts()}
+
+
+def tool_imar_sorgula(args):
+    return imar_mod.imar_sorgula(args.get("il"), args.get("ilce"), args.get("mahalle"),
+                                 args.get("ada"), args.get("parsel"))
+
+
+def tool_parsel_imar(args):
+    il, ilce = args.get("il"), args.get("ilce")
+    mahalle, ada, parsel = args.get("mahalle"), args.get("ada"), args.get("parsel")
+    crs = str(args.get("crs") or "tm").strip().lower()
+    if crs not in ("tm", "wgs84", "both"):
+        raise ApiError("crs 'tm', 'wgs84' veya 'both' olmali (gelen: %s)." % crs)
+    istenen_dxf = args.get("dxf")
+    if istenen_dxf is None:
+        istenen_dxf = True
+    if isinstance(istenen_dxf, str):
+        istenen_dxf = istenen_dxf.strip().lower() not in ("0", "false", "hayir", "no")
+
+    feature, cozum = _tkgm_coz(il, ilce, mahalle, ada, parsel)
+    ozet = _parsel_ozet(feature, "parsel_imar", {"cozumleme": cozum})
+
+    imar_kayit = None
+    try:
+        imar_kayit = imar_mod.imar_sorgula(il, ilce, mahalle, ada, parsel)
+    except imar_mod.ApiError as exc:
+        imar_kayit = exc.as_dict()
+        if imar_kayit.get("hata_tipi") in KAPSAM_TIPLERI:
+            imar_kayit["engel"] = imar_kayit["hata_tipi"]
+            imar_kayit["hata_tipi"] = "imar_kapsam_disi"
+            imar_kayit["portal"] = imar_kayit.get("portal") or imar_mod.ILLER.get(il, {}).get("url")
+        elif imar_kayit.get("hata_tipi") == "bulunamadi":
+            imar_kayit["hata_tipi"] = "imar_bulunamadi"
+        elif imar_kayit.get("hata_tipi") == "belirsiz":
+            imar_kayit["hata_tipi"] = "imar_belirsiz"
+        elif imar_kayit.get("hata_tipi") == "imar_yok":
+            pass
+
+    dxf_sonuc = None
+    if istenen_dxf:
+        dxf_sonuc = parsel_dxf_uret(feature, cozum, crs, imar_kayit=imar_kayit)
+
+    return {
+        "sorgu": {"il": cozum["il"], "ilce": cozum["ilce"], "mahalle": cozum["mahalle"],
+                  "ada": cozum["ada"], "parsel": cozum["parsel"]},
+        "tkgm": ozet,
+        "imar": imar_kayit,
+        "dxf": dxf_sonuc,
+        "kaynak": {"tkgm": "https://cbsapi.tkgm.gov.tr/megsiswebapi.v3.1/api/parsel/%s/%s/%s"
+                            % (cozum["mahalle_id"], cozum["ada"], cozum["parsel"]),
+                   "imar": (imar_kayit or {}).get("kaynak", {}).get("sorgu_url")
+                           or (imar_kayit or {}).get("portal")},
+        "sorgu_zamani": _ts(),
+    }
+
+
+def _ts():
+    return imar_mod.now_tr()
 
 TOOLS = [
     {
@@ -1010,6 +1168,73 @@ TOOLS = [
         },
         "handler": tool_parsel_dxf,
     },
+    {
+        "name": "imar_iller_listele",
+        "description": "Imar destegi olan illeri, portal adreslerini ve durumlarini listeler (aktif / giris_gerekli / captcha / bakimda / modul_yok / erisilemedi / zaman_asimi).",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "handler": tool_imar_iller_listele,
+    },
+    {
+        "name": "imar_ilceler_listele",
+        "description": "Bir ilin e-Imar portalindaki ilce listesi (KEOS idari ilce servisi).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"il": {"type": "string", "description": "Il adi, or. 'Rize'"}},
+            "required": ["il"],
+            "additionalProperties": False,
+        },
+        "handler": tool_imar_ilceler_listele,
+    },
+    {
+        "name": "imar_mahalleler_listele",
+        "description": "Bir il/ilce icin idari mahalleler ve tapu mahalleleri listesi (imar sorgusunda tapu mahalle adi kullanilir).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "il": {"type": "string", "description": "Il adi, or. 'Rize'"},
+                "ilce": {"type": "string", "description": "Ilce adi (opsiyonel; portal tek ilceli ise bos birakilabilir)"},
+            },
+            "required": ["il"],
+            "additionalProperties": False,
+        },
+        "handler": tool_imar_mahalleler_listele,
+    },
+    {
+        "name": "imar_sorgula",
+        "description": "Ada/parsel ile imar durumu: plan adi, kullanim/fonksiyon, emsal (KAKS), TAKS, kat sayisi, yapi nizami, bina yuksekligi, cekme mesafeleri, plan notlari, koordinat, kaynak URL.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "il": {"type": "string", "description": "Il adi, or. 'Rize'"},
+                "ilce": {"type": "string", "description": "Ilce adi (portal tek ilceli ise bos birakilabilir)"},
+                "mahalle": {"type": "string", "description": "Tapu mahalle adi; ada/parsel birden fazla mahallede varsa zorunlu"},
+                "ada": {"type": "string", "description": "Ada numarasi"},
+                "parsel": {"type": "string", "description": "Parsel numarasi"},
+            },
+            "required": ["il", "ada", "parsel"],
+            "additionalProperties": False,
+        },
+        "handler": tool_imar_sorgula,
+    },
+    {
+        "name": "parsel_imar",
+        "description": "BIRLESIK: tek cagrida TKGM parsel bilgisi (alan, nitelik, pafta, mevkii, geometri) + imar durumu (emsal, TAKS, KAKS, kat, nizam, H, cekme, plan adi/notu) + DXF (IMAR katmani dahil). Imar kapsam disiysa TKGM verisi yine doner, imar alaninda imar_kapsam_disi + portal linki olur.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "il": {"type": "string", "description": "Il adi, or. 'Rize'"},
+                "ilce": {"type": "string", "description": "Ilce adi, or. 'Merkez'"},
+                "mahalle": {"type": "string", "description": "Mahalle adi, or. 'Tophane'"},
+                "ada": {"type": "string", "description": "Ada numarasi"},
+                "parsel": {"type": "string", "description": "Parsel numarasi"},
+                "dxf": {"type": "boolean", "description": "DXF uret (varsayilan true)"},
+                "crs": {"type": "string", "enum": ["tm", "wgs84", "both"], "description": "DXF koordinat sistemi (varsayilan tm)"},
+            },
+            "required": ["il", "ilce", "mahalle", "ada", "parsel"],
+            "additionalProperties": False,
+        },
+        "handler": tool_parsel_imar,
+    },
 ]
 
 TOOL_MAP = {t["name"]: t for t in TOOLS}
@@ -1042,7 +1267,8 @@ def handle(msg):
                 "TKGM parsel sorgu araclari (salt okunur). Il/ilce/mahalle adindan gitmek icin "
                 "parsel_bul kullanin; id ile gitmek icin iller_listele -> ilceler_listele -> "
                 "mahalleler_listele -> parsel_sorgula zincirini izleyin. Koordinatla sorgu: "
-                "parsel_sorgula_koordinat. CAD ciktisi (DXF): parsel_dxf (crs: tm | wgs84 | both)."
+                "parsel_sorgula_koordinat. CAD ciktisi (DXF): parsel_dxf (crs: tm | wgs84 | both). "
+                "Imar durumu: imar_iller_listele -> imar_sorgula; TKGM + imar + DXF tek cagrida: parsel_imar."
             ),
         })
 
@@ -1071,9 +1297,15 @@ def handle(msg):
             data = tool["handler"](arguments)
             text = json.dumps(data, ensure_ascii=False, indent=2)
             return _result(msg_id, {"content": [{"type": "text", "text": text}], "isError": False})
+        except imar_mod.ApiError as exc:
+            return _result(msg_id, {
+                "content": [{"type": "text", "text": json.dumps(exc.as_dict(), ensure_ascii=False, indent=2)}],
+                "isError": True,
+            })
         except ApiError as exc:
             return _result(msg_id, {
-                "content": [{"type": "text", "text": "HATA: %s" % exc}],
+                "content": [{"type": "text", "text": json.dumps(
+                    {"durum": "hata", "hata_tipi": "hata", "mesaj": str(exc)}, ensure_ascii=False, indent=2)}],
                 "isError": True,
             })
         except Exception as exc:  # beklenmeyen

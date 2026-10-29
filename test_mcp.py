@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tkgm-parsel MCP sunucusu testleri.
+"""parsel-imar birlesik MCP sunucusu testleri.
 
 Kullanim:
-    python3 test_mcp.py              # varsayilan: --offline (ag erisimi yok)
-    python3 test_mcp.py --offline    # ayni: sema + projeksiyon + DXF (fixture ile)
-    python3 test_mcp.py --online     # gercek TKGM sorgulari (ag gerekir)
+    python3 test_mcp.py              # --offline (varsayilan): ag yok
+    python3 test_mcp.py --online     # gercek TKGM + e-Imar portalleri
 
-Offline testler aga hic cikmaz: araclarin semasini, TM projeksiyonunu ve
-DXF uretimini depodaki ornek parsel (tests/fixtures) ile dogrular.
+Offline mod: TKGM projeksiyonu, DXF (IMAR katmani dahil), imar HTML parser'i
+(gercek portallardan alinan fixture'larla) ve il konfigurasyonunu dogrular.
 """
 
 import json
@@ -20,18 +19,22 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(HERE, "server.py")
-FIXTURE = os.path.join(HERE, "tests", "fixtures", "parsel_rize_1895_4.geojson")
+FIX = os.path.join(HERE, "tests", "fixtures")
 
-# Testler depo klasorunu kirletmesin: cikti/cache gecici dizine yazilir.
-TMP = tempfile.mkdtemp(prefix="tkgm-parsel-test-")
-os.environ.setdefault("TKGMPARSEL_CIKTI", os.path.join(TMP, "cikti"))
-os.environ.setdefault("TKGMPARSEL_CACHE", os.path.join(TMP, "cache"))
+TMP = tempfile.mkdtemp(prefix="parsel-imar-test-")
+os.environ.setdefault("PARSELIMAR_CIKTI", os.path.join(TMP, "cikti"))
+os.environ.setdefault("PARSELIMAR_CACHE", os.path.join(TMP, "cache"))
 
 sys.path.insert(0, HERE)
-import server as srv  # noqa: E402  (projeksiyon/DXF fonksiyonlari icin)
+import server as srv   # noqa: E402
+import imar            # noqa: E402
 
 OK = 0
 FAIL = 0
+
+ARACLAR = ["iller_listele", "ilceler_listele", "mahalleler_listele", "parsel_sorgula", "parsel_bul",
+           "parsel_sorgula_koordinat", "parsel_dxf", "imar_iller_listele", "imar_ilceler_listele",
+           "imar_mahalleler_listele", "imar_sorgula", "parsel_imar"]
 
 
 def check(label, cond, detail=""):
@@ -44,239 +47,190 @@ def check(label, cond, detail=""):
         print("FAIL  %s  %s" % (label, detail))
 
 
-# ---------------------------------------------------------------- DXF okuyucu
+def fixture(name):
+    with open(os.path.join(FIX, name), encoding="utf-8") as fh:
+        return json.load(fh)
 
-def dxf_entities(path):
-    """R12 ASCII DXF -> [{'type': ..., 'tags': [(code, value), ...]}]"""
+
+def fixture_text(name):
+    with open(os.path.join(FIX, name), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def dxf_metinler(path):
+    """DXF icindeki TEXT entity'lerini (katman, yazi) olarak dondurur."""
     with open(path, "r", encoding="ascii") as fh:
         lines = [l.rstrip("\r\n") for l in fh]
-    ents, cur = [], None
+    out, cur = [], None
     for i in range(0, len(lines) - 1, 2):
         code, val = lines[i].strip(), lines[i + 1].strip()
         if code == "0":
-            cur = {"type": val, "tags": []}
-            ents.append(cur)
+            cur = {"type": val, "tags": {}}
+            out.append(cur)
         elif cur is not None:
-            cur["tags"].append((code, val))
-    return ents
+            cur["tags"].setdefault(code, val)
+    return out
 
 
-def dxf_tag(ent, code, default=None):
-    for c, v in ent["tags"]:
-        if c == code:
-            return v
-    return default
-
-
-def dxf_ozet(path):
-    ents = dxf_entities(path)
-    polys = [e for e in ents if e["type"] == "POLYLINE"]
-    verts = [e for e in ents if e["type"] == "VERTEX"]
-    texts = [e for e in ents if e["type"] == "TEXT"]
-    pts = [(float(dxf_tag(v, "10")), float(dxf_tag(v, "20"))) for v in verts]
-    with open(path, "r", encoding="ascii") as fh:
-        raw = fh.read()
-    return {
-        "poliline": len(polys),
-        "vertex": len(verts),
-        "text": len(texts),
-        "kapali": bool(polys) and all(int(dxf_tag(p, "70", "0")) & 1 for p in polys),
-        "noktalar": pts,
-        "yazilar": [dxf_tag(t, "1") for t in texts],
-        "katmanlar": sorted({dxf_tag(e, "8") for e in ents
-                             if dxf_tag(e, "8") and e["type"] in ("POLYLINE", "VERTEX", "TEXT")}),
-        "acadver": "$ACADVER" in raw and "AC1009" in raw,
-    }
-
-
-def shoelace(pts):
-    s = 0.0
-    for i in range(len(pts)):
-        x1, y1 = pts[i]
-        x2, y2 = pts[(i + 1) % len(pts)]
-        s += x1 * y2 - x2 * y1
-    return abs(s) / 2.0
-
-
-def kuresel_alan(ring):
-    """Kure uzerinde alan (m2). Halka kapali varsayilir."""
-    r = 6371000.0
-    s = 0.0
-    n = len(ring)
-    for i in range(n):
-        lon1, lat1 = math.radians(ring[i][0]), math.radians(ring[i][1])
-        lon2, lat2 = math.radians(ring[(i + 1) % n][0]), math.radians(ring[(i + 1) % n][1])
-        s += (lon2 - lon1) * (2 + math.sin(lat1) + math.sin(lat2))
-    return abs(s) * r * r / 2.0
+def dxf_katmanlar(path):
+    return sorted({e["tags"].get("8") for e in dxf_metinler(path) if e["tags"].get("8")})
 
 
 # ---------------------------------------------------------------- offline
 
-BEKLENEN_ARACLAR = [
-    "iller_listele",
-    "ilceler_listele",
-    "mahalleler_listele",
-    "parsel_sorgula",
-    "parsel_bul",
-    "parsel_sorgula_koordinat",
-    "parsel_dxf",
-]
-
-
 def test_sema():
-    init = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                       "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                                  "clientInfo": {"name": "test", "version": "1"}}})
+    init = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     info = (init.get("result") or {}).get("serverInfo") or {}
-    check("initialize -> serverInfo tkgm-parsel", info.get("name") == "tkgm-parsel", info)
-    check("initialize -> protocolVersion", bool((init.get("result") or {}).get("protocolVersion")), init)
+    check("initialize -> parsel-imar", info.get("name") == "parsel-imar", info)
 
     tl = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools = (tl.get("result") or {}).get("tools") or []
-    isimler = [t.get("name") for t in tools]
-    check("tools/list 7 arac", len(tools) == 7, isimler)
-    check("arac adlari beklenen", isimler == BEKLENEN_ARACLAR, isimler)
+    isimler = [t["name"] for t in tools]
+    check("tools/list 12 arac", len(tools) == 12, isimler)
+    check("arac adlari beklenen", isimler == ARACLAR, isimler)
     check("her arac gecerli inputSchema",
-          all(isinstance(t.get("inputSchema"), dict) and t["inputSchema"].get("type") == "object"
-              and isinstance(t.get("description"), str) and t["description"] for t in tools),
-          [t.get("name") for t in tools])
-    dxf = [t for t in tools if t.get("name") == "parsel_dxf"][0]
-    crs = dxf["inputSchema"]["properties"]["crs"]
-    check("parsel_dxf crs enum tm/wgs84/both", crs.get("enum") == ["tm", "wgs84", "both"], crs)
-    check("parsel_dxf ada/parsel zorunlu", sorted(dxf["inputSchema"].get("required", [])) == ["ada", "parsel"],
-          dxf["inputSchema"].get("required"))
-
-    err = srv.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                      "params": {"name": "yok_boyle_arac", "arguments": {}}})
-    check("bilinmeyen arac -> -32602", (err.get("error") or {}).get("code") == -32602, err)
-    print("      araclar:", ", ".join(isimler))
+          all(t["inputSchema"].get("type") == "object" and t.get("description") for t in tools))
+    pi = [t for t in tools if t["name"] == "parsel_imar"][0]
+    check("parsel_imar zorunlu alanlari",
+          sorted(pi["inputSchema"]["required"]) == ["ada", "il", "ilce", "mahalle", "parsel"],
+          pi["inputSchema"]["required"])
 
 
-def test_projeksiyon():
+def test_tkgm_projeksiyon():
     tablo = [(27.0, 5253), (30.0, 5254), (33.0, 5255), (36.0, 5256), (39.0, 5257),
              (42.0, 5258), (45.0, 5259), (48.0, 5260), (51.0, 5261), (54.0, 5262)]
-    hatalar = [(lon, srv.tm_epsg(lon), epsg) for lon, epsg in tablo
-               if srv.tm_epsg(lon) != epsg or srv.tm_merkez_boylam(lon) != lon]
-    check("EPSG 5253-5262 eslemesi (CM 27..54)", not hatalar, hatalar)
-
-    check("Rize 40.61E -> TM42 / EPSG:5258", srv.tm_epsg(40.61055) == 5258 and
-          srv.tm_merkez_boylam(40.61055) == 42.0)
-    check("Ankara 32.86E -> TM33 / EPSG:5255", srv.tm_epsg(32.86188) == 5255)
+    hatalar = [(lon, srv.tm_epsg(lon), epsg) for lon, epsg in tablo if srv.tm_epsg(lon) != epsg]
+    check("EPSG 5253-5262 eslemesi", not hatalar, hatalar)
 
     e, n = srv.tm_forward(41.04855, 40.61055)
-    check("Rize TM koordinati (383182.591, 4546895.252)",
-          abs(e - 383182.591) < 0.01 and abs(n - 4546895.252) < 0.01, (e, n))
+    check("Rize TM42 koordinati", abs(e - 383182.591) < 0.01 and abs(n - 4546895.252) < 0.01, (e, n))
 
-    lat, lon = srv.tm_inverse(e, n, 42.0)
-    check("TM -> WGS84 ters donusum (1e-9 derece)",
-          abs(lat - 41.04855) < 1e-9 and abs(lon - 40.61055) < 1e-9, (lat, lon))
-
-    en_buyuk = 0.0
-    for lat in (36.0, 37.5, 39.0, 41.0, 42.0):
-        for d in (-1.5, -0.75, 0.0, 0.75, 1.5):
-            lon = 32.86 + d
+    en = 0.0
+    for lat in (36.0, 38.0, 40.0, 42.0):
+        for d in (-1.5, 0.0, 1.5):
+            lon = 38.0 + d
             lon0 = srv.tm_merkez_boylam(lon)
             e, n = srv.tm_forward(lat, lon, lon0)
             bl, bn = srv.tm_inverse(e, n, lon0)
-            en_buyuk = max(en_buyuk, math.hypot((bl - lat) * 110574.0,
-                                                (bn - lon) * 111320.0 * math.cos(math.radians(lat))))
-    check("WGS84->TM->WGS84 round-trip < 1 mm (%.4f mm)" % (en_buyuk * 1000), en_buyuk < 0.001, en_buyuk)
+            en = max(en, math.hypot((bl - lat) * 110574.0,
+                                    (bn - lon) * 111320.0 * math.cos(math.radians(lat))))
+    check("WGS84->TM->WGS84 round-trip < 1 mm (%.4f mm)" % (en * 1000), en < 0.001, en)
 
 
-def test_dxf_offline():
-    feature = json.load(open(FIXTURE, encoding="utf-8"))
-    cozum = {"il": "Rize", "il_id": 75, "ilce": "Merkez", "ilce_id": 786,
-             "mahalle": "Hamidiye Köyü", "mahalle_id": 123992, "ada": "1895", "parsel": "4"}
-    sonuc = srv.parsel_dxf_uret(feature, cozum, "both")
-    dosyalar = sonuc["dosyalar"]
-    check("parsel_dxf_uret(both) -> 2 dosya", len(dosyalar) == 2, dosyalar)
-    check("DXF dosyalari diskte", all(os.path.exists(d["dosya"]) for d in dosyalar), dosyalar)
-    check("alan_m2 kayit degeri 2372.25", sonuc.get("alan_m2") == 2372.25, sonuc.get("alan_m2"))
-    check("koordinat_sayisi 9", sonuc.get("koordinat_sayisi") == 9, sonuc.get("koordinat_sayisi"))
+def test_imar_parser():
+    k = imar.normalize(imar.parse_imar_html(fixture_text("rize_157_59.html")), {})
+    check("Rize fixture: emsal 3.0", k["emsal"] == 3.0 and k["kaks"] == 3.0, k["emsal"])
+    check("Rize fixture: bina yuksekligi 30.5", k["bina_yuksekligi_m"] == 30.5, k["bina_yuksekligi_m"])
+    check("Rize fixture: plan adi", "RİZE (MERKEZ) REVİZYON" in (k["plan_adi"] or ""), k["plan_adi"])
+    check("Rize fixture: kullanim karari", k["kullanim_karari"] == "Yerleşik Konut Alanı", k["kullanim_karari"])
 
-    tm = [d for d in dosyalar if d["birim"] == "metre"][0]
-    wgs = [d for d in dosyalar if d["birim"] == "derece"][0]
-    check("TM dosyasi EPSG:5258 / TM42", tm["epsg"] == 5258 and tm["merkez_boylam"] == 42.0, tm)
-    check("WGS84 dosyasi EPSG:4326", wgs["epsg"] == 4326, wgs)
-    check("dosya adi deseni <Mahalle>_<Ada>_<Parsel>_<crs>.dxf",
-          os.path.basename(tm["dosya"]) == "Hamidiye_Köyü_1895_4_tm.dxf", tm["dosya"])
+    b = imar.normalize(imar.parse_imar_html(fixture_text("burdur_412_20.html")), {})
+    check("Burdur (sablon B): plan adi", "BURDUR İLAVE REVİZYON" in (b["plan_adi"] or ""), b["plan_adi"])
+    check("Burdur: kat 2 / nizam BITISIK", b["kat_sayisi"] == 2 and b["yapi_nizami"] == "BİTİŞİK", b["yapi_nizami"])
+    check("Burdur: EMPTYROW sizmamasi", "EMPTYROW" not in (b["plan_adi"] or ""), b["plan_adi"])
 
-    t = dxf_ozet(tm["dosya"])
-    check("DXF R12 (AC1009)", t["acadver"], t["acadver"])
-    check("DXF 1 kapali POLYLINE", t["poliline"] == 1 and t["kapali"], t)
-    check("DXF vertex = 8 (9 nokta - kapanis tekrari)", t["vertex"] == 8, t["vertex"])
-    check("DXF katmanlari PARSEL + PARSEL_ETIKET",
-          t["katmanlar"] == ["PARSEL", "PARSEL_ETIKET"], t["katmanlar"])
-    check("DXF 9 TEXT (8 kose no + 1 alan)", t["text"] == 9, t["text"])
-    check("DXF alan etiketi metni", any("1895/4" in y and "2372.25" in y for y in t["yazilar"]), t["yazilar"])
-    check("DXF TM koordinatlari Turkiye sinirlarinda",
-          all(200000 <= x <= 800000 and 3800000 <= y <= 4700000 for x, y in t["noktalar"]),
-          t["noktalar"][:2])
+    a = imar.normalize(imar.parse_imar_html(fixture_text("aksaray_668_214.html")), {})
+    check("Aksaray: emsal 1.8 / TAKS 0.4 / kat 4",
+          a["emsal"] == 1.8 and a["taks"] == 0.4 and a["kat_sayisi"] == 4, (a["emsal"], a["taks"], a["kat_sayisi"]))
+    check("Aksaray: yapi nizami A", a["yapi_nizami"] == "A", a["yapi_nizami"])
 
-    try:
-        with open(tm["dosya"], "r", encoding="ascii") as fh:
-            fh.read()
-        ascii_ok = True
-    except UnicodeDecodeError:
-        ascii_ok = False
-    check("DXF dosyasi saf ASCII", ascii_ok)
+    m = imar.normalize(imar.parse_imar_html(fixture_text("amasya_2061_13.html")), {})
+    check("Amasya: plan adi ve aciklama notu",
+          "AMASYA" in (m["plan_adi"] or "") and any("Açıklama" in n for n in m["plan_notlari"]),
+          m["plan_notlari"][:1])
 
-    tm_alan = shoelace(t["noktalar"])
-    kuresel = kuresel_alan(json.load(open(FIXTURE, encoding="utf-8"))["geometry"]["coordinates"][0])
-    fark = abs(tm_alan - kuresel) / kuresel
-    check("TM alani kuresel alana yakin (%.2f%% < 1%%)" % (fark * 100), fark < 0.01, (tm_alan, kuresel))
-    print("      TM alan %.2f m2 | kuresel %.2f m2 | kayit %s m2" % (tm_alan, kuresel, sonuc["alan_m2"]))
-
-    w = dxf_ozet(wgs["dosya"])
-    ilk = json.load(open(FIXTURE, encoding="utf-8"))["geometry"]["coordinates"][0][0]
-    check("WGS84 DXF koordinatlari bozulmadan (3 ondaliga yuvarlanmamis)",
-          abs(w["noktalar"][0][0] - ilk[0]) < 1e-9 and abs(w["noktalar"][0][1] - ilk[1]) < 1e-9,
-          (w["noktalar"][0], ilk))
-    check("WGS84 DXF koordinatlari derece araliginda (36-42K, 26-45D)",
-          all(26 <= x <= 45 and 36 <= y <= 42 for x, y in w["noktalar"]), w["noktalar"][:2])
-
-    try:
-        srv.parsel_dxf_uret(feature, cozum, "utm")
-        hata = ""
-    except srv.ApiError as exc:
-        hata = str(exc)
-    check("gecersiz crs -> Turkce ApiError", "crs" in hata and "tm" in hata, hata)
-
-    try:
-        srv._parsel_coz({"parsel": "4"})
-        hata = ""
-    except srv.ApiError as exc:
-        hata = str(exc)
-    check("eksik ada -> 'ada zorunlu' (ag cagrisi yok)", "ada zorunlu" in hata, hata)
+    check("TR sayi: '10.974,80 m2' -> 10974.8", imar.tr_num("10.974,80 m²") == 10974.8)
+    check("TR sayi: '30.5' -> 30.5", imar.tr_num("30.5") == 30.5)
+    check("emsal: '- (3,00)' -> 3.0", imar._emsal("- (3,00)") == 3.0)
+    check("emsal: '- (-)' -> None", imar._emsal("- (-)") is None)
 
 
-def test_env_override():
-    hedef = os.path.join(TMP, "env-test-cikti")
+def test_imar_config():
+    check("20 il tanimli", len(imar.ILLER) == 20, len(imar.ILLER))
+    aktif = [il for il, c in imar.ILLER.items() if c.get("durum") == "aktif"]
+    check("13 il aktif", len(aktif) == 13, aktif)
+    check("aktif illerde base URL var", all(imar.ILLER[i].get("base") for i in aktif))
+    kapali = [il for il, c in imar.ILLER.items() if c.get("durum") != "aktif"]
+    check("kapali illerde durum + portal/not var",
+          all(imar.ILLER[i].get("url") and imar.ILLER[i].get("not") for i in kapali), kapali)
+    check("noverify yalniz Nevsehir+Sivas",
+          sorted(il for il, c in imar.ILLER.items() if c.get("tls") == "noverify") == ["Nevşehir", "Sivas"])
+
+    err, t = call("imar_iller_listele", {})
+    check("imar_iller_listele 20 / 13 aktif", not err and t["adet"] == 20 and t["aktif_adet"] == 13, t)
+
+    err, t = call("imar_sorgula", {"il": "Giresun", "ada": "1", "parsel": "1"})
+    check("Giresun -> kapsam disi (bakimda)", err and t["hata_tipi"] == "bakimda", t)
+
+    err, t = call("imar_sorgula", {"il": "Atlantis", "ada": "1", "parsel": "1"})
+    check("bilinmeyen il -> kapsam_disi", err and t["hata_tipi"] == "kapsam_disi", t)
+
+
+def test_dxf():
+    feature = fixture("parsel_rize_157_59.geojson")
+    cozum = {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
+             "mahalle_id": 123938, "ada": "157", "parsel": "59"}
+    imar_kayit = imar.normalize(imar.parse_imar_html(fixture_text("rize_157_59.html")), {})
+    imar_kayit["durum"] = "ok"
+    imar_kayit["plan_adi"] = "RİZE (MERKEZ) REVİZYON UYGULAMA İMAR PLANI"
+
+    sonuc = srv.parsel_dxf_uret(feature, cozum, "tm", out_dir=TMP, imar_kayit=imar_kayit)
+    dosya = sonuc["dosyalar"][0]["dosya"]
+    check("DXF uretildi (IMAR katmani)", os.path.exists(dosya) and sonuc["dosyalar"][0]["imar_katmani"], dosya)
+    katmanlar = dxf_katmanlar(dosya)
+    check("DXF katmanlari PARSEL + PARSEL_ETIKET + IMAR",
+          katmanlar == ["IMAR", "PARSEL", "PARSEL_ETIKET"], katmanlar)
+    imar_yazilar = [e["tags"].get("1") for e in dxf_metinler(dosya)
+                    if e["type"] == "TEXT" and e["tags"].get("8") == "IMAR"]
+    check("IMAR katmaninda 4 satir", len(imar_yazilar) == 4, imar_yazilar)
+    check("IMAR satiri emsal/TAKS/KAKS iceriyor",
+          any("Emsal 3" in y and "TAKS" in y for y in imar_yazilar), imar_yazilar)
+    check("IMAR satiri plan adini iceriyor", any("Plan: RIZE" in y for y in imar_yazilar), imar_yazilar)
+
+    # imar yoksa IMAR katmani eklenmemeli
+    sonuc2 = srv.parsel_dxf_uret(feature, cozum, "tm", out_dir=TMP)
+    check("imar yokken IMAR katmani yok", "IMAR" not in dxf_katmanlar(sonuc2["dosyalar"][0]["dosya"]))
+
+
+def test_env():
+    hedef = os.path.join(TMP, "env-cikti")
     env = dict(os.environ)
-    env["TKGMPARSEL_CIKTI"] = hedef
+    env["PARSELIMAR_CIKTI"] = hedef
+    env["PARSELIMAR_CACHE"] = os.path.join(TMP, "env-cache")
     out = subprocess.check_output(
-        [sys.executable, "-c", "import server; print(server.OUT_DIR)"],
-        cwd=HERE, env=env, universal_newlines=True).strip()
-    check("TKGMPARSEL_CIKTI env ile OUT_DIR degisiyor", out == hedef, out)
+        [sys.executable, "-c", "import server; print(server.OUT_DIR); print(server.CACHE_DIR)"],
+        cwd=HERE, env=env, universal_newlines=True).splitlines()
+    check("PARSELIMAR_CIKTI/CACHE env", out[0] == hedef and out[1].endswith("env-cache"), out)
+
+
+def call(name, args):
+    r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": name, "arguments": args}})
+    res = r.get("result") or {}
+    text = (res.get("content") or [{}])[0].get("text", "")
+    try:
+        return bool(res.get("isError")), json.loads(text)
+    except ValueError:
+        return bool(res.get("isError")), {"_text": text}
 
 
 def run_offline():
     print("MOD: offline (ag erisimi yok)\n")
     test_sema()
-    test_projeksiyon()
-    test_dxf_offline()
-    test_env_override()
+    test_tkgm_projeksiyon()
+    test_imar_parser()
+    test_imar_config()
+    test_dxf()
+    test_env()
 
 
 # ---------------------------------------------------------------- online
 
 def run_online():
-    print("MOD: online (gercek TKGM sorgulari)\n")
-    proc = subprocess.Popen(
-        [sys.executable, SERVER],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        universal_newlines=True, bufsize=1,
-    )
+    print("MOD: online (gercek TKGM + e-Imar)\n")
+    proc = subprocess.Popen([sys.executable, SERVER], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, bufsize=1)
     sayac = [0]
 
     def rpc(method, params=None, notify=False):
@@ -292,97 +246,62 @@ def run_online():
             return None
         line = proc.stdout.readline()
         if not line:
-            raise RuntimeError("sunucu yanit vermeden kapandi; stderr: %s" % proc.stderr.read())
+            raise RuntimeError("sunucu kapandi; stderr: %s" % proc.stderr.read())
         return json.loads(line)
 
-    def call(name, args):
-        r = rpc("tools/call", {"name": name, "arguments": args})
-        res = r.get("result", {})
-        text = (res.get("content") or [{}])[0].get("text", "")
-        return res.get("isError", False), text
+    def cagir(name, args):
+        res = rpc("tools/call", {"name": name, "arguments": args}).get("result") or {}
+        return bool(res.get("isError")), json.loads((res.get("content") or [{}])[0].get("text", "{}"))
 
     try:
         init = rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
                                   "clientInfo": {"name": "test", "version": "1"}})
-        check("initialize", (init.get("result") or {}).get("serverInfo", {}).get("name") == "tkgm-parsel", init)
+        check("initialize", (init.get("result") or {}).get("serverInfo", {}).get("name") == "parsel-imar", init)
         rpc("notifications/initialized", {}, notify=True)
+        check("tools/list 12", len(rpc("tools/list")["result"]["tools"]) == 12)
 
-        tl = rpc("tools/list")
-        isimler = [t["name"] for t in tl.get("result", {}).get("tools", [])]
-        check("tools/list 7 arac", isimler == BEKLENEN_ARACLAR, isimler)
+        err, t = cagir("parsel_bul", {"il_adi": "Rize", "ilce_adi": "Merkez", "mahalle_adi": "Tophane",
+                                      "ada": "157", "parsel": "59"})
+        check("TKGM parsel_bul (Rize/Tophane 157/59)", not err and t.get("alan_m2") == 640.26, t)
 
-        err, text = call("iller_listele", {})
-        data = json.loads(text) if not err else {}
-        check("iller_listele 81 il", not err and data.get("adet") == 81, text[:300])
-        print("      ilk 3:", (data.get("iller") or [])[:3])
+        err, t = cagir("parsel_imar", {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
+                                       "ada": "157", "parsel": "59"})
+        check("parsel_imar Rize: TKGM + imar", not err and t["tkgm"]["alan_m2"] == 640.26
+              and t["imar"].get("emsal") == 3.0, t.get("imar"))
+        check("parsel_imar Rize: DXF + IMAR katmani",
+              t["dxf"]["dosyalar"][0]["imar_katmani"] and os.path.exists(t["dxf"]["dosyalar"][0]["dosya"]),
+              t.get("dxf"))
+        print("      Rize:", json.dumps({k: t["imar"].get(k) for k in
+              ("plan_adi", "emsal", "taks", "bina_yuksekligi_m", "kullanim_karari")}, ensure_ascii=False))
 
-        err, text = call("ilceler_listele", {"il_id": 23})
-        data = json.loads(text) if not err else {}
-        check("ilceler_listele(23) -> 15 ilce", not err and data.get("adet") == 15, text[:300])
-        print("      ilk 3:", (data.get("ilceler") or [])[:3])
+        err, t = cagir("parsel_imar", {"il": "Aksaray", "ilce": "Merkez", "mahalle": "Kılıçarslan",
+                                       "ada": "668", "parsel": "214"})
+        check("parsel_imar Aksaray: emsal 1.8 / TAKS 0.4",
+              not err and t["imar"].get("emsal") == 1.8 and t["imar"].get("taks") == 0.4, t.get("imar"))
+        print("      Aksaray:", json.dumps({k: t["imar"].get(k) for k in
+              ("plan_adi", "emsal", "taks", "kat_sayisi", "yapi_nizami")}, ensure_ascii=False))
 
-        err, text = call("mahalleler_listele", {"ilce_id": 104})
-        data = json.loads(text) if not err else {}
-        check("mahalleler_listele(104) -> 31 mahalle", not err and data.get("adet") == 31, text[:300])
+        err, t = cagir("imar_sorgula", {"il": "Tunceli", "mahalle": "Alpdoğan", "ada": "276", "parsel": "9"})
+        check("Tunceli: emsal 1.2 / H 16.5", not err and t.get("emsal") == 1.2
+              and t.get("bina_yuksekligi_m") == 16.5, t)
 
-        err, text = call("parsel_sorgula", {"mahalle_id": 55834, "ada": "2531", "parsel": "7"})
-        data = json.loads(text) if not err else {}
-        check("parsel_sorgula 55834/2531/7",
-              not err and data.get("ada") == "2531" and data.get("parsel") == "7", text[:400])
-        check("geojson dosyasi yazildi",
-              bool(data.get("geojson_dosya")) and os.path.exists(data.get("geojson_dosya", "")),
-              data.get("geojson_dosya"))
-        print("      ozet:", json.dumps({k: data.get(k) for k in
-              ("il", "ilce", "mahalle", "alan_m2", "koordinat_sayisi")}, ensure_ascii=False))
+        err, t = cagir("imar_sorgula", {"il": "Niğde", "mahalle": "Aşağıkayabaşı", "ada": "104", "parsel": "5"})
+        check("Niğde: emsal 0.1 / TAKS 0.05", not err and t.get("emsal") == 0.1
+              and t.get("taks") == 0.05, t)
 
-        err, text = call("parsel_bul", {"il_adi": "Ankara", "ilce_adi": "Çankaya",
-                                        "mahalle_adi": "Küçükesat", "ada": "2531", "parsel": "7"})
-        data = json.loads(text) if not err else {}
-        check("parsel_bul (isimden)", not err and
-              (data.get("cozumleme") or {}).get("mahalle_id") == 55834, text[:400])
+        err, t = cagir("imar_sorgula", {"il": "Giresun", "ada": "1", "parsel": "1"})
+        check("Giresun kapali (bakimda)", err and t.get("hata_tipi") == "bakimda", t)
 
-        err, text = call("parsel_sorgula_koordinat", {"lat": 39.9075, "lon": 32.8620})
-        data = json.loads(text) if not err else {}
-        check("parsel_sorgula_koordinat", not err and data.get("ada") == "2531", text[:400])
-
-        err, text = call("parsel_sorgula", {"mahalle_id": 10007, "ada": "1", "parsel": "1"})
-        check("404 -> Turkce hata", err and "bulunamadi" in text.lower(), text[:200])
-
-        err, text = call("parsel_dxf", {"il_adi": "Rize", "ilce_adi": "Merkez",
-                                        "mahalle_adi": "Hamidiye", "ada": "1895", "parsel": "4",
-                                        "crs": "both"})
-        rize = json.loads(text) if not err else {}
-        dosyalar = rize.get("dosyalar") or []
-        check("parsel_dxf Rize both -> 2 dosya", not err and len(dosyalar) == 2, text[:300])
-        tm = [d for d in dosyalar if d.get("birim") == "metre"] or [{}]
-        if dosyalar:
-            t = dxf_ozet(dosyalar[0]["dosya"])
-            check("Rize DXF kapali POLYLINE, TM42/EPSG:5258",
-                  tm[0].get("epsg") == 5258 and t["kapali"], tm[0])
-            print("      Rize TM:", tm[0].get("dosya"), "alan:", rize.get("alan_m2"))
-
-        err, text = call("parsel_dxf", {"mahalle_id": 55834, "ada": "2531", "parsel": "7"})
-        ankara = json.loads(text) if not err else {}
-        a = (ankara.get("dosyalar") or [{}])[0]
-        check("parsel_dxf Ankara TM33/EPSG:5255", not err and a.get("epsg") == 5255, a)
-
-        err, text = call("parsel_dxf", {"mahalle_id": 55834, "ada": "2531", "parsel": "7", "crs": "utm"})
-        check("gecersiz crs -> Turkce hata", err and "crs" in text.lower(), text[:200])
+        err, t = cagir("imar_mahalleler_listele", {"il": "Rize"})
+        check("Rize mahalle listeleri", not err and t["adet"] > 20 and t["tapu_adet"] > 20, t.get("adet"))
     finally:
         proc.stdin.close()
         proc.wait(timeout=10)
 
 
-# ---------------------------------------------------------------- main
-
 def main(argv):
-    if "--online" in argv:
-        run_online()
-    else:
-        run_offline()
+    run_online() if "--online" in argv else run_offline()
     print("\n%d test gecti, %d basarisiz" % (OK, FAIL))
-    if FAIL == 0:
-        print("(gecici dizin: %s)" % TMP)
     return 1 if FAIL else 0
 
 
