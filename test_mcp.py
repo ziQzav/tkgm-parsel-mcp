@@ -163,6 +163,9 @@ def test_cizim():
         print("SKIP  PNG (cairosvg yok)")
     svg = open(resim["svg"], encoding="utf-8").read()
     check("PNG/SVG: TR sayi bicimi (640,26)", "640,26" in svg, svg[:60])
+    check("PNG: olcu yazilari beyaz zeminli kutu icinde", 'fill-opacity="0.88"' in svg, svg[:80])
+    check("PNG: olcu yazilari kenardan ofsetli (ayri x/y)",
+          svg.count("<text") >= len(tm), svg.count("<text"))
     check("PNG: cekme cizgisi yalniz gecerli offsette",
           (cekme is not None) == ('class="cekme"' in svg), (cekme is not None))
 
@@ -211,6 +214,35 @@ def test_ozet_pdf_ve_birlestirme():
     check("rapor.md: baslik + uyari", "Parsel bilgi paketi" in md and "ruhsata esas" in md.lower(), md[:80])
 
 
+def _pdf_metrik(path):
+    """pymupdf varsa: sayfa sayisi, bos sayfa, gorsel orani, harita renk cesitliligi."""
+    try:
+        import pymupdf
+        import numpy as np
+        from PIL import Image
+        import io
+    except ImportError:
+        return None
+    doc = pymupdf.open(path)
+    sayfa = []
+    for i, page in enumerate(doc):
+        oran = 0.0
+        kenar = None
+        for inf in page.get_image_info():
+            bb = pymupdf.Rect(inf["bbox"])
+            oran = max(oran, abs(bb.width * bb.height) / (page.rect.width * page.rect.height))
+            kenar = min(bb.x0, bb.y0, page.rect.width - bb.x1, page.rect.height - bb.y1)
+        pix = page.get_pixmap(dpi=90)
+        img = np.asarray(Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB"))
+        dolu = float((img.sum(axis=2) < 720).mean())
+        renk = float(len(np.unique(img.reshape(-1, 3), axis=0)))
+        sayfa.append({"no": i + 1, "gorsel_oran": round(oran, 2), "dolu": round(dolu, 3),
+                      "renk": renk, "yatay": page.rect.width > page.rect.height,
+                      "kenar_pt": None if kenar is None else round(kenar, 1)})
+    doc.close()
+    return sayfa
+
+
 def test_paket_offline():
     feature = fixture("parsel_rize_157_59.geojson")
     cozum = {"il": "Rize", "il_id": 75, "ilce": "Merkez", "ilce_id": 786,
@@ -253,6 +285,12 @@ def test_paket_offline():
     check("paket(offline): birlesik >= 4 sayfa", (t.get("paket_pdf") or {}).get("sayfa", 0) >= 4,
           t.get("paket_pdf"))
     check("paket(offline): zip icinde >= 7 dosya", len(t.get("zip_icerik") or []) >= 7, t.get("zip_icerik"))
+
+    m = _pdf_metrik(d.get("paket.pdf", ""))
+    if m:
+        check("paket(offline): bos sayfa yok", all(x["dolu"] > 0.003 for x in m), [x["dolu"] for x in m])
+        check("paket(offline): cizim sayfasi gorsel orani >= 0.55",
+              any(x["gorsel_oran"] >= 0.55 for x in m[2:4]), [x["gorsel_oran"] for x in m])
 
 
 # ---------------------------------------------------------------- online
@@ -318,13 +356,28 @@ def run_online():
             check("paket %s: dosyalar" % il,
                   not err and all(k in d for k in ("ozet.pdf", "paket.pdf", "kaynak_imar.pdf",
                                                    "parsel.dxf", "parsel.png", "paket.zip")), sorted(d))
-            check("paket %s: birlesik 5+ sayfa" % il, (t.get("paket_pdf") or {}).get("sayfa", 0) >= 4,
+            check("paket %s: birlesik 4+ sayfa" % il, (t.get("paket_pdf") or {}).get("sayfa", 0) >= 4,
                   (t or {}).get("paket_pdf"))
             check("paket %s: kaynak pdf > 100 KB" % il,
                   os.path.getsize(d.get("kaynak_imar.pdf", "/dev/null")) > 100000,
                   d.get("kaynak_imar.pdf"))
             if d.get("parsel.png"):
                 check("paket %s: PNG >=1200 px" % il, png_boyut(d["parsel.png"])[0] >= 1200)
+            m = _pdf_metrik(d.get("paket.pdf", ""))
+            if m:
+                check("paket %s: 5 sayfa (3 ozet + 2 kaynak), bos yok" % il,
+                      len(m) == 5 and all(x["dolu"] > 0.003 for x in m), [x["dolu"] for x in m])
+                check("paket %s: cizim sayfasi >=%%55 alan" % il,
+                      m[2]["gorsel_oran"] >= 0.55, m[2]["gorsel_oran"])
+                check("paket %s: kaynak sayfalar yatay ve >=%%70 alan" % il,
+                      m[3]["yatay"] and m[4]["yatay"] and m[3]["gorsel_oran"] >= 0.70
+                      and m[4]["gorsel_oran"] >= 0.70,
+                      [(x["yatay"], x["gorsel_oran"]) for x in m[3:]])
+                check("paket %s: kaynak kenar bosluğu <= 1 cm" % il,
+                      all((x["kenar_pt"] or 0) <= 30 for x in m[3:]),
+                      [x["kenar_pt"] for x in m[3:]])
+                check("paket %s: kaynakta harita renk cesitliligi" % il,
+                      m[3]["renk"] > 500 and m[3]["dolu"] > 0.10, (m[3]["renk"], m[3]["dolu"]))
             else:
                 print("SKIP  paket %s png (cairosvg yok)" % il)
             print("      %s: paket.pdf %d sayfa %.0f KB | kaynak %.0f KB | zip %.0f KB" % (

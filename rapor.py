@@ -265,20 +265,26 @@ class PDF(object):
         self.c.stroke()
         self.y += 10
 
-    def gorsel(self, path, baslik=None, alt_yazi=None):
+    def gorsel(self, path, baslik=None, alt_yazi=None, kenar=42.5):
+        """Gorseli basliktan sonra kalan alana 'contain' yerlestirir (15 mm kenar)."""
         surf = cairo.ImageSurface.create_from_png(path)
         w, h = surf.get_width(), surf.get_height()
-        alan_w = A4[0] - 2 * KENAR
-        alan_h = A4[1] - UST - ALT - (40 if alt_yazi else 20)
-        olcek = min(alan_w / w, alan_h / h)
+        alan_w = A4[0] - 2 * kenar
+        ust = max(self.y + 8, UST + 8)
+        alan_h = (A4[1] - kenar) - ust - (16 if alt_yazi else 0)
+        olcek = min(alan_w / float(w), alan_h / float(h))
         gx, gy = w * olcek, h * olcek
-        x = (A4[0] - gx) / 2
-        self.c.set_source_surface(surf, x, UST + 6)
+        x = (A4[0] - gx) / 2.0
+        self.c.save()
+        self.c.translate(x, ust)
+        self.c.scale(olcek, olcek)
+        self.c.set_source_surface(surf, 0, 0)
         self.c.paint()
-        self.y = UST + 6 + gy + 10
+        self.c.restore()
+        self.y = ust + gy + 6
         if alt_yazi:
-            self._yaz((A4[0] - self.genislik(alt_yazi, 8))/2, self.y + 8, alt_yazi, 8, False, "gri")
-            self.y += 16
+            self._yaz((A4[0] - self.genislik(alt_yazi, 8)) / 2.0, self.y + 8, alt_yazi, 8, False, "gri")
+            self.y += 14
 
 def pdf_sayfa_sayisi(path):
     """PDF icindeki sayfa nesnelerini (sikistirilmis objstm dahil) sayar."""
@@ -309,7 +315,14 @@ def _kv_tablo(pdf, satirlar, genislik=(1.1, 2.9)):
     pdf.tablo(["Alan", "Değer"], satirlar, list(genislik))
 
 
-def ozet_pdf(path, veri, gorsel=None):
+def _v(x, bos="belirtilmemiş"):
+    if x is None:
+        return bos
+    t = str(x).strip()
+    return bos if t in ("", "-", "--", "None") else t
+
+
+def ozet_pdf(path, veri, gorsel=None, kaynak_png=None):
     """3 sayfa: 1 kapak+parsel, 2 imar, 3 cizim + kaynak. Donus: {yazildi,sayfa,neden}."""
     if cairo is None:
         return {"yazildi": False, "sayfa": 0, "neden": "cairocffi yok"}
@@ -351,28 +364,40 @@ def ozet_pdf(path, veri, gorsel=None):
         if veri.get("imar_hata"):
             ih = veri["imar_hata"]
             pdf.p("İmar verisi alınamadı: %s (%s)" % (ih.get("mesaj"), ih.get("hata_tipi")), 9.5, "kirmizi")
+        cekme = im.get("cekme_mesafeleri") or {}
+        cekme_metin = " / ".join(_sayi(cekme.get(k), True) for k in ("on", "yan", "arka"))
+        if all(cekme.get(k) is None for k in ("on", "yan", "arka")):
+            cekme_metin = "belirtilmemiş"
+        else:
+            cekme_metin = cekme_metin + " m"
         _kv_tablo(pdf, [
-            ["Plan adı", im.get("plan_adi") or "—"],
-            ["Kullanım / fonksiyon", im.get("kullanim_karari") or "—"],
-            ["Emsal (KAKS)", _sayi(im.get("emsal"), True)],
-            ["TAKS", _sayi(im.get("taks"), True)],
-            ["Bina yüksekliği (H)", "%s m" % _sayi(im.get("bina_yuksekligi_m"), True)],
-            ["Kat sayısı (imar)", _sayi(im.get("kat_sayisi"))],
-            ["Yapı nizamı", im.get("yapi_nizami") or "—"],
-            ["Çekme (ön/yan/arka)", "%s / %s / %s m" % (
-                _sayi((im.get("cekme_mesafeleri") or {}).get("on")),
-                _sayi((im.get("cekme_mesafeleri") or {}).get("yan")),
-                _sayi((im.get("cekme_mesafeleri") or {}).get("arka")))],
-            ["Pafta / ölçek", "%s / %s" % (im.get("pafta") or "—", im.get("olcek") or "—")],
-            ["Kaynak URL", (im.get("kaynak") or {}).get("sorgu_url") or "—"],
-            ["Son kontrol", im.get("sorgu_zamani") or "—"],
+            ["Plan adı", _v(im.get("plan_adi"))],
+            ["Kullanım / fonksiyon", _v(im.get("kullanim_karari"))],
+            ["Emsal (KAKS)", _sayi(im.get("emsal"), True) if im.get("emsal") is not None else "belirtilmemiş"],
+            ["TAKS", _sayi(im.get("taks"), True) if im.get("taks") is not None else "belirtilmemiş"],
+            ["Bina yüksekliği (H)", ("%s m" % _sayi(im.get("bina_yuksekligi_m"), True))
+             if im.get("bina_yuksekligi_m") is not None else "belirtilmemiş"],
+            ["Kat sayısı (imar)", _sayi(im.get("kat_sayisi")) if im.get("kat_sayisi") is not None else "belirtilmemiş"],
+            ["Yapı nizamı", _v(im.get("yapi_nizami"))],
+            ["Çekme (ön/yan/arka)", cekme_metin],
+            ["Pafta / ölçek", "%s / %s" % (_v(im.get("pafta")), _v(im.get("olcek")))],
+            ["Kaynak URL", _v((im.get("kaynak") or {}).get("sorgu_url"))],
+            ["Son kontrol", _v(im.get("sorgu_zamani"))],
         ])
         notlar = im.get("plan_notlari") or []
+        pdf.bosluk(2)
+        pdf.h2("Plan notları")
         if notlar:
-            pdf.bosluk(4)
-            pdf.h2("Plan notları")
             for n in notlar[:12]:
                 pdf.madde(n, 8.6)
+        else:
+            pdf.p("Plan notu bulunamadı (portal bu parsel için plan notu döndürmedi).", 8.8, "gri")
+        pdf.bosluk(2)
+        pdf.h2("Kaynak portal")
+        pdf.p("Sorgu: %s" % _v((im.get("kaynak") or {}).get("sorgu_url")), 8.4, "gri")
+        if kaynak_png and os.path.exists(kaynak_png):
+            pdf.gorsel(kaynak_png, alt_yazi="Kaynak sayfa önizleme — tam boy: kaynak_imar.png",
+                       kenar=52)
 
         # 3 — cizim
         pdf.yeni_sayfa("Parsel çizimi (1/500)")
@@ -385,6 +410,40 @@ def ozet_pdf(path, veri, gorsel=None):
                 "sayfa_dogrulama": pdf_sayfa_sayisi(path)}
     except Exception as exc:
         return {"yazildi": False, "sayfa": 0, "neden": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def gorsel_pdf(png, path, yatay=True, kenar=22.7):
+    """PNG(ler)i A4 raster PDF'e yerlestirir (sayfa basina bir gorsel, print CSS yok)."""
+    if cairo is None:
+        return {"yazildi": False, "neden": "cairocffi yok"}
+    liste = png if isinstance(png, (list, tuple)) else [png]
+    try:
+        gen, yuk = (A4[1], A4[0]) if yatay else (A4[0], A4[1])
+        surf = cairo.PDFSurface(path, gen, yuk)
+        c = cairo.Context(surf)
+        sayfa = 0
+        for yol in liste:
+            if not yol or not os.path.exists(yol):
+                continue
+            c.set_source_rgb(1, 1, 1)
+            c.rectangle(0, 0, gen, yuk)
+            c.fill()
+            img = cairo.ImageSurface.create_from_png(yol)
+            w, h = img.get_width(), img.get_height()
+            olcek = min((gen - 2 * kenar) / float(w), (yuk - 2 * kenar) / float(h))
+            gx, gy = w * olcek, h * olcek
+            c.save()
+            c.translate((gen - gx) / 2.0, (yuk - gy) / 2.0)
+            c.scale(olcek, olcek)
+            c.set_source_surface(img, 0, 0)
+            c.paint()
+            c.restore()
+            c.show_page()
+            sayfa += 1
+        surf.finish()
+        return {"yazildi": sayfa > 0, "sayfa": sayfa, "yol": path}
+    except Exception as exc:
+        return {"yazildi": False, "neden": "%s: %s" % (type(exc).__name__, exc)}
 
 
 def birlestir(ozet, kaynak, hedef):

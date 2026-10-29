@@ -5,7 +5,11 @@ Hesap, maliyet, kural motoru **yoktur**; ürün "karar öncesi bilgi dosyası" �
 
 ![Özet PDF — sayfa 1](docs/ornek_ozet_s1.png)
 
-![Kaynak sayfa (portalın kendi çıktısı)](docs/ornek_kaynak_tam.png)
+![Özet PDF — sayfa 2 (imar + kaynak önizleme)](docs/ornek_ozet_s2.png)
+
+![Kaynak sayfa 1 — harita (portalın kendi çıktısı)](docs/ornek_harita_s4.png)
+
+![Kaynak sayfa 2 — tablo](docs/ornek_tablo_s5.png)
 
 ---
 
@@ -45,11 +49,11 @@ Yerine gelen: **kaynak sayfa** (portalın `imar.aspx` çıktısı, harita + tabl
 | Dosya | Kaynak |
 |---|---|
 | `ozet.pdf` | Bizim özetimiz — 3 sayfa, A4, gömülü DejaVu, TR sayı biçimi |
-| `kaynak_imar.pdf` | Portalın `imar.aspx` sayfası (print CSS, harita + tablo) |
+| `kaynak_imar.pdf` | Portalın `imar.aspx` sayfası — **2 yatay A4 sayfa**: (1) başlık + harita, (2) bilgi tablosu. Ekran görüntüsü kırpılarak 8 mm kenarla yerleştirilir (print CSS haritayı boşalttığı için kullanılmaz) |
 | `kaynak_imar.png` | Aynı sayfanın tam sayfa görüntüsü (1280 px genişlik) |
-| `paket.pdf` | **Özet (3) + kaynak (2) = 5+ sayfa**, tek PDF |
+| `paket.pdf` | **Özet (3 dikey) + kaynak (2 yatay) = 5 sayfa**, tek PDF (boş/taşan sayfa yok) |
 | `parsel.dxf` | R12, kapalı POLYLINE, `PARSEL` + `IMAR` etiket katmanı |
-| `parsel.png` | 1/500 vaziyet: parsel, çekme sınırı (yalnız geçerli offset), ölçü, kuzey, ölçek |
+| `parsel.png` | 1/500 vaziyet: parsel, çekme sınırı (yalnız geçerli offset), ölçüler (kenardan 2,5-5 m dışa, beyaz zeminli), kuzey oku (K ayrık), ölçek |
 | `rapor.json` / `rapor.md` | Tek şema: `{sorgu, parsel, imar, kaynak_sayfa, cizim, uyarilar, zaman}` |
 | `paket.zip` | Yukarıdakilerin tamamı (deflate) |
 
@@ -97,16 +101,20 @@ bağımlılıkları kullanmaz.**
 
 | Parsel | paket.pdf | kaynak_imar.pdf | ZIP | Not |
 |---|---|---|---|---|
-| Rize/Tophane 157/59 | 5 sayfa · 838 KB | 697 KB | 3,1 MB | kaynak 2 sayfa |
-| Aksaray/Kılıçarslan 668/214 | 6 sayfa · 456 KB | 313 KB | 2,0 MB | kaynak 3 sayfa |
+| Rize/Tophane 157/59 | 5 sayfa · 3,4 MB | 515 KB | 8,9 MB | kaynak 2 yatay sayfa |
+| Aksaray/Kılıçarslan 668/214 | 5 sayfa · 3,3 MB | 393 KB | 8,9 MB | kaynak 2 yatay sayfa |
+
+Not: kaynak sayfa raster olduğu için PDF/ZIP boyutu büyür (harita + uydu görüntüsü); metin
+aranabilirliği özet sayfalarda korunur.
 
 `paket` süresi: Rize **8,8 sn** (kaynak sayfa 8,3 sn), aynı anda özet+DXF+PNG+ZIP.
 
 ## Sınırlar
 
 - **Resmî API değil**: TKGM `cbsapi` ve KEOS `imarsvc` uçları site arayüzünden çıkarıldı; portal değişirse kırılabilir.
-- **Kaynak sayfa** portalın kendi print CSS'i ile üretilir; sayfa bölünmesi portalın düzenine bağlıdır
-  (harita/tablo 2-3 sayfaya bölünebilir).
+- **Kaynak sayfalar** portalın ekran görüntüsüdür (print CSS haritayı boşalttığı için kullanılmaz).
+  Harita ve tablo ayrı yatay A4 sayfalara kırpılır (görüntü alanı %84 / %87, kenar 8 mm);
+  harita ipucu (tooltip) çekimden önce gizlenir.
 - **TKGM sayfası birebir alınmıyor**: portal "Kullanım Koşulları" modalı ve özel dropdown'lar
   kullanıyor; v3'te TKGM verisi özet tabloda yer alır (`kaynak_sayfa_tkgm` deneysel bayrak).
 - **Hesap/maliyet yok**: daire sayısı, inşaat alanı, maliyet hesaplanmaz; bu kararlar mimara aittir.
@@ -118,8 +126,8 @@ bağımlılıkları kullanmaz.**
 ## Testler
 
 ```bash
-python3 test_mcp.py            # offline: 24 kontrol (şema, alias, parser, DXF/PNG, PDF, birleştirme, ZIP)
-python3 test_mcp.py --online   # 14 kontrol: 2 gerçek parsel uçtan uca + kaynak sayfa
+python3 test_mcp.py            # offline: 28 kontrol (şema, alias, parser, DXF/PNG, PDF, birleştirme, ZIP, sayfa metrikleri)
+python3 test_mcp.py --online   # 25 kontrol: 2 gerçek parsel + kaynak sayfa + sayfa/görsel metrikleri
 ```
 
 Offline mod ağa çıkmaz: TKGM/imar/kaynak fonksiyonları fixture ve mock ile değiştirilir.

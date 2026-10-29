@@ -844,7 +844,7 @@ def _kaynak_cekim(il, ilce, mahalle, ada, parsel, out_dir, tkgm=False):
     aday = imar_mod._sec(adaylar, mahalle)
     cfg = imar_mod.ILLER.get(il) or {}
     url = (cfg.get("base") or "") + "imar.aspx?parselid=%s" % aday["parsel_id"]
-    sonuc = kaynak.kaynak_sayfa(url, out_dir, "kaynak_imar", yatay=True)
+    sonuc = kaynak.kaynak_sayfa(url, out_dir, "kaynak_imar", yatay=False)
     sonuc["parsel_id"] = aday["parsel_id"]
     sonuc["tapu_mahalle"] = aday.get("tapu_mahalle")
     if tkgm:
@@ -1090,7 +1090,8 @@ def tool_paket(args):
         except imar_mod.ApiError as exc:
             kaynak_sonuc = {"durum": "hata", "hata": exc.mesaj, "hata_tipi": exc.tip}
         veri["kaynak_sayfa"] = {k: kaynak_sonuc.get(k) for k in
-                                ("durum", "pdf", "png", "url", "sure_sn", "plan_pdf", "hata")}
+                                ("durum", "pdf", "png", "url", "sure_sn", "plan_pdf", "hata",
+                                 "kaynak_sayfa", "tooltip_gizlendi")}
         if kaynak_sonuc.get("pdf"):
             dosyalar["kaynak_imar.pdf"] = kaynak_sonuc["pdf"]
         if kaynak_sonuc.get("png"):
@@ -1100,7 +1101,8 @@ def tool_paket(args):
 
     # 3) ozet PDF (3 sayfa)
     ozet = os.path.join(out_dir, "ozet.pdf")
-    ozet_meta = rapor.ozet_pdf(ozet, veri, dosyalar.get("parsel.png"))
+    ozet_meta = rapor.ozet_pdf(ozet, veri, dosyalar.get("parsel.png"),
+                               dosyalar.get("kaynak_imar.png"))
     if ozet_meta.get("yazildi"):
         dosyalar["ozet.pdf"] = ozet
 

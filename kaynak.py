@@ -48,8 +48,11 @@ def _calistir(url, out_dir, ad, yatay, bekle_ms, timeout_s):
     os.makedirs(out_dir, exist_ok=True)
     pdf_yol = os.path.join(out_dir, ad + ".pdf")
     png_yol = os.path.join(out_dir, ad + ".png")
+    harita_yol = os.path.join(out_dir, ad + "_harita.png")
+    tablo_yol = os.path.join(out_dir, ad + "_tablo.png")
     sonuc = {"durum": "ok", "url": url, "pdf": None, "png": None, "pdf_linkleri": [],
-             "plan_pdf": None, "sure_sn": None, "hata": None}
+             "plan_pdf": None, "sure_sn": None, "hata": None, "tooltip_gizlendi": False,
+             "kaynak_sayfa": 0}
     t0 = time.time()
 
     async def isler():
@@ -58,7 +61,7 @@ def _calistir(url, out_dir, ad, yatay, bekle_ms, timeout_s):
             if exe:
                 kw["executable_path"] = exe
             browser = await p.chromium.launch(**kw)
-            ctx = await browser.new_context(viewport={"width": 1280, "height": 1600},
+            ctx = await browser.new_context(viewport={"width": 1600, "height": 1800},
                                             user_agent=UA, accept_downloads=True)
             page = await ctx.new_page()
             try:
@@ -70,20 +73,52 @@ def _calistir(url, out_dir, ad, yatay, bekle_ms, timeout_s):
                     pass
             await page.wait_for_timeout(bekle_ms)
             try:
-                await page.emulate_media(media="print")
+                await page.mouse.move(1, 1)
+                await page.keyboard.press("Escape")
+                sonuc["tooltip_gizlendi"] = bool(await page.evaluate("""() => {
+                    let n = 0;
+                    document.querySelectorAll('.map-hint-bubble').forEach(e => {
+                        e.classList.remove('visible'); e.style.display = 'none'; n++;
+                    });
+                    return n;
+                }"""))
             except Exception:
                 pass
-            await page.pdf(path=pdf_yol, format="A4", landscape=bool(yatay),
-                           print_background=True,
-                           margin={"top": "8mm", "bottom": "8mm", "left": "8mm", "right": "8mm"})
-            try:
-                await page.emulate_media(media="screen")
-            except Exception:
-                pass
+            await page.wait_for_timeout(400)
             await page.screenshot(path=png_yol, full_page=True)
+
             try:
-                hrefs = await page.eval_on_selector_all(
-                    "a[href]", "els => els.map(e => e.href)")
+                box = await page.evaluate("""() => {
+                    const g = e => e ? e.getBoundingClientRect() : null;
+                    const m = g(document.querySelector('#map-container'));
+                    const t = g(document.querySelector('#htmlOutput'));
+                    return {map: m && {x: m.x, y: m.y, w: m.width, h: m.height},
+                            tablo: t && {x: t.x, y: t.y, w: t.width, h: t.height}};
+                }""")
+            except Exception:
+                box = {}
+
+            klipler = []
+            if box.get("map"):
+                m = box["map"]
+                k = {"x": max(0.0, m["x"]), "y": 0.0, "width": m["w"],
+                     "height": min(m["y"] + m["h"] + 20.0, 1800.0)}
+                try:
+                    await page.screenshot(path=harita_yol, clip=k, full_page=True)
+                    klipler.append(harita_yol)
+                except Exception:
+                    pass
+            if box.get("tablo"):
+                t = box["tablo"]
+                k = {"x": max(0.0, t["x"] - 20.0), "y": t["y"],
+                     "width": min(t["w"] + 40.0, 1200.0), "height": t["h"]}
+                try:
+                    await page.screenshot(path=tablo_yol, clip=k, full_page=True)
+                    klipler.append(tablo_yol)
+                except Exception:
+                    pass
+            try:
+                hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
             except Exception:
                 hrefs = []
             pdf_linkler = [h for h in hrefs if isinstance(h, str) and ".pdf" in h.lower()]
@@ -102,24 +137,40 @@ def _calistir(url, out_dir, ad, yatay, bekle_ms, timeout_s):
                     sonuc["plan_pdf_hata"] = "%s: %s" % (type(exc).__name__, exc)
             await ctx.close()
             await browser.close()
+            return klipler
 
     try:
-        asyncio.run(isler())
+        klipler = asyncio.run(isler())
     except Exception as exc:
         sonuc["durum"] = "hata"
         sonuc["hata"] = "%s: %s" % (type(exc).__name__, exc)
+        klipler = []
+
     sonuc["sure_sn"] = round(time.time() - t0, 1)
-    if os.path.exists(pdf_yol) and os.path.getsize(pdf_yol) > 5000:
-        sonuc["pdf"] = pdf_yol
-    else:
-        sonuc["durum"] = "hata" if sonuc["durum"] == "ok" else sonuc["durum"]
-        sonuc["hata"] = sonuc["hata"] or "pdf uretilemedi"
     if os.path.exists(png_yol) and os.path.getsize(png_yol) > 5000:
         sonuc["png"] = png_yol
+    else:
+        sonuc["durum"] = "hata" if sonuc["durum"] == "ok" else sonuc["durum"]
+        sonuc["hata"] = sonuc["hata"] or "ekran goruntusu uretilemedi"
+
+    kaynaklar = [x for x in klipler if os.path.exists(x) and os.path.getsize(x) > 5000]
+    if not kaynaklar and sonuc["png"]:
+        kaynaklar = [sonuc["png"]]
+    if kaynaklar:
+        try:
+            import rapor
+            meta = rapor.gorsel_pdf(kaynaklar, pdf_yol, yatay=True, kenar=22.7)
+            if meta.get("yazildi"):
+                sonuc["pdf"] = pdf_yol
+                sonuc["kaynak_sayfa"] = meta.get("sayfa", 0)
+            else:
+                sonuc["pdf_hata"] = meta.get("neden")
+        except Exception as exc:
+            sonuc["pdf_hata"] = "%s: %s" % (type(exc).__name__, exc)
     return sonuc
 
 
-def kaynak_sayfa(url, out_dir, ad="kaynak_imar", yatay=True, bekle_ms=3500, timeout_s=90):
+def kaynak_sayfa(url, out_dir, ad="kaynak_imar", yatay=False, bekle_ms=3500, timeout_s=90):
     d = durum()
     if not d["hazir"]:
         return {"durum": "bagimlilik_yok", "url": url,

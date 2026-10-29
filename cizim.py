@@ -128,18 +128,19 @@ def _tr(v, ond=2):
 
 def kuzey_oku(x, y, h):
     return [
-        {"tip": "line", "katman": "KROKI", "a": (x, y), "b": (x, y + h * 2)},
-        {"tip": "line", "katman": "KROKI", "a": (x - h * 0.35, y + h * 1.3), "b": (x, y + h * 2)},
-        {"tip": "line", "katman": "KROKI", "a": (x + h * 0.35, y + h * 1.3), "b": (x, y + h * 2)},
-        {"tip": "text", "katman": "KROKI", "x": x, "y": y + h * 2.4, "yazi": "K", "h": h * 0.8},
+        {"tip": "line", "katman": "CIZGI", "a": (x, y), "b": (x, y + h * 2)},
+        {"tip": "line", "katman": "CIZGI", "a": (x - h * 0.35, y + h * 1.3), "b": (x, y + h * 2)},
+        {"tip": "line", "katman": "CIZGI", "a": (x + h * 0.35, y + h * 1.3), "b": (x, y + h * 2)},
+        {"tip": "text", "katman": "KROKI", "x": x, "y": y + h * 3.0, "yazi": "K",
+         "h": h * 0.7, "aci": 0},
     ]
 
 
 def olcek_cubugu(x, y, uzunluk, etiket, h):
     return [
-        {"tip": "line", "katman": "OLCU", "a": (x, y), "b": (x + uzunluk, y)},
-        {"tip": "line", "katman": "OLCU", "a": (x, y - h * 0.3), "b": (x, y + h * 0.6)},
-        {"tip": "line", "katman": "OLCU", "a": (x + uzunluk, y - h * 0.3), "b": (x + uzunluk, y + h * 0.6)},
+        {"tip": "line", "katman": "CIZGI", "a": (x, y), "b": (x + uzunluk, y)},
+        {"tip": "line", "katman": "CIZGI", "a": (x, y - h * 0.3), "b": (x, y + h * 0.6)},
+        {"tip": "line", "katman": "CIZGI", "a": (x + uzunluk, y - h * 0.3), "b": (x + uzunluk, y + h * 0.6)},
         {"tip": "text", "katman": "OLCU", "x": x + uzunluk / 2, "y": y - h * 0.9, "yazi": etiket, "h": h},
     ]
 
@@ -162,7 +163,7 @@ def svg_yaz(path, entities, baslik):
         xs, ys = [0.0, 1.0], [0.0, 1.0]
     x0, x1 = min(xs), max(xs)
     y0, y1 = min(ys), max(ys)
-    pad = max(x1 - x0, y1 - y0) * 0.06 + 0.5
+    pad = max(x1 - x0, y1 - y0) * 0.08 + 0.5
     vx, vy = x0 - pad, -(y1 + pad)
     vw, vh = (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad
 
@@ -183,10 +184,21 @@ def svg_yaz(path, entities, baslik):
                          % (tx(e["a"][0]), ty(e["a"][1]), tx(e["b"][0]), ty(e["b"][1]), k))
         elif tip == "text":
             yazi = _ascii(e.get("yazi", "")).replace("&", "&amp;").replace("<", "&lt;")
+            boy = e.get("h", 1.0) * 0.9
             aci = -float(e.get("aci", 0.0))
-            rot = (' transform="rotate(%.2f %.2f %.2f)"' % (aci, tx(e["x"]), ty(e["y"]))) if aci else ""
-            parca.append('<text x="%.2f" y="%.2f" font-size="%.2f" class="%s"%s>%s</text>'
-                         % (tx(e["x"]), ty(e["y"]), e.get("h", 1.0) * 0.9, k, rot, yazi))
+            if e.get("arka"):
+                w = 0.58 * boy * len(yazi) + boy * 0.8
+                h = boy * 1.55
+                parca.append(
+                    '<g transform="translate(%.2f,%.2f) rotate(%.2f)">'
+                    '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#ffffff" '
+                    'fill-opacity="0.88" stroke="none"/>'
+                    '<text x="0" y="0" font-size="%.2f" class="%s">%s</text></g>'
+                    % (tx(e["x"]), ty(e["y"]), aci, -w / 2, -h / 2, w, h, boy, k, yazi))
+            else:
+                rot = (' transform="rotate(%.2f %.2f %.2f)"' % (aci, tx(e["x"]), ty(e["y"]))) if aci else ""
+                parca.append('<text x="%.2f" y="%.2f" font-size="%.2f" class="%s"%s>%s</text>'
+                             % (tx(e["x"]), ty(e["y"]), boy, k, rot, yazi))
 
     svg = """<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1400" height="%.0f" viewBox="0 0 %.2f %.2f">
@@ -195,6 +207,7 @@ def svg_yaz(path, entities, baslik):
   .parsel {fill:#dcfce7;fill-opacity:0.35;stroke:#15803d;stroke-width:0.12}
   .cekme {fill:none;stroke:#d97706;stroke-width:0.07;stroke-dasharray:0.6 0.4}
   .olcu {fill:#b91c1c;stroke:none;font-family:sans-serif;text-anchor:middle}
+  .cizgi {fill:none;stroke:#111827;stroke-width:0.09}
   .kroki {fill:#111827;stroke:none;font-family:sans-serif;text-anchor:middle}
   .olculine {stroke:#dc2626;stroke-width:0.05}
   text {dominant-baseline:middle;text-anchor:middle}
@@ -240,17 +253,27 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
     if cekme_poly:
         ent.append({"tip": "polyline", "katman": "CEKME", "noktalar": cekme_poly})
 
+    # disa dogru ofset (olcu yazisi cizgiye binmesin)
+    ofs = max(2.5, g * 0.05)
     for i in range(len(parse)):
         a, b = parse[i], parse[(i + 1) % len(parse)]
         mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-        L = math.hypot(b[0] - a[0], b[1] - a[1])
-        aci = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(dx, dy)
+        if L < 1e-6:
+            continue
+        # CCW poligonda dis normal = (dy, -dx)
+        nx, ny = dy / L, -dx / L
+        if icinde((mx + nx * (ofs + 0.6), my + ny * (ofs + 0.6)), parse):
+            nx, ny = -nx, -ny
+        px, py = mx + nx * ofs, my + ny * ofs
+        aci = math.degrees(math.atan2(dy, dx))
         if aci > 90:
             aci -= 180
         elif aci < -90:
             aci += 180
-        ent.append({"tip": "text", "katman": "OLCU", "x": mx, "y": my,
-                    "yazi": "%s m" % _tr(L), "h": h_txt * 0.8, "aci": aci})
+        ent.append({"tip": "text", "katman": "OLCU", "x": px, "y": py,
+                    "yazi": "%s m" % _tr(L), "h": h_txt * 0.8, "aci": aci, "arka": True})
 
     y = min(ys) - h_txt * 2.5
     satirlar = ["ADA/PARSEL: %s" % kimlik,
@@ -265,8 +288,8 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
         ent.append({"tip": "text", "katman": "KROKI", "x": (min(xs) + max(xs)) / 2, "y": y,
                     "yazi": s_, "h": h_txt * 0.8})
         y -= h_txt * 1.4
-    ent += kuzey_oku(max(xs) + h_txt, max(ys) - h_txt, h_txt * 0.8)
-    ent += olcek_cubugu(min(xs), min(ys) - h_txt * 9, 20.0, "20 m", h_txt * 0.7)
+    ent += kuzey_oku(max(xs) + ofs * 2.2, max(ys) - h_txt, h_txt * 0.8)
+    ent += olcek_cubugu(min(xs) - ofs * 1.2, min(ys) - h_txt * 11, 20.0, "20 m", h_txt * 0.7)
 
     os.makedirs(out_dir, exist_ok=True)
     svg = svg_yaz(os.path.join(out_dir, "parsel.svg"), ent, "%s - %s" % (baslik, kimlik))
