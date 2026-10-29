@@ -175,5 +175,6 @@ def kaynak_sayfa(url, out_dir, ad="kaynak_imar", yatay=False, bekle_ms=3500, tim
     if not d["hazir"]:
         return {"durum": "bagimlilik_yok", "url": url,
                 "hata": "playwright/chromium yok (kaynak sayfa alinamadi)",
+                "kurulum": "./setup.sh --with-browser",
                 "pdf": None, "png": None, "plan_pdf": None}
     return _calistir(url, out_dir, ad, yatay, bekle_ms, timeout_s)

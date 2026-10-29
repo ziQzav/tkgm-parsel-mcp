@@ -325,9 +325,11 @@ def _v(x, bos="belirtilmemiş"):
 def ozet_pdf(path, veri, gorsel=None, kaynak_png=None):
     """3 sayfa: 1 kapak+parsel, 2 imar, 3 cizim + kaynak. Donus: {yazildi,sayfa,neden}."""
     if cairo is None:
-        return {"yazildi": False, "sayfa": 0, "neden": "cairocffi yok"}
+        return {"yazildi": False, "sayfa": 0, "neden": "cairocffi yok",
+                "kurulum": "./setup.sh"}
     if not _font_var():
-        return {"yazildi": False, "sayfa": 0, "neden": "DejaVu Sans fontu yok"}
+        return {"yazildi": False, "sayfa": 0, "neden": "DejaVu Sans fontu yok",
+                "kurulum": "DejaVu Sans yukleyin (ornek: apt-get install fonts-dejavu-core)"}
 
     p = veri.get("parsel") or {}
     im = veri.get("imar") or {}
@@ -452,7 +454,8 @@ def birlestir(ozet, kaynak, hedef):
         from pypdf import PdfWriter, PdfReader
     except Exception:
         return {"durum": "pypdf_yok", "yol": None,
-                "not": "pypdf kurulu degil; ozet ve kaynak PDF ayri dosya olarak birakildi."}
+                "not": "pypdf kurulu degil; ozet ve kaynak PDF ayri dosya olarak birakildi.",
+                "kurulum": "./setup.sh"}
     try:
         w = PdfWriter()
         sayfa = 0

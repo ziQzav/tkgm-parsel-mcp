@@ -170,6 +170,13 @@ def test_cizim():
           (cekme is not None) == ('class="cekme"' in svg), (cekme is not None))
     check("PNG: baslik bandi ~%12", 0.10 <= (resim.get("band_orani") or 0) <= 0.155,
           resim.get("band_orani"))
+    mes = [m["merkez_mesafe_m"] for m in (resim.get("etiket_mesafeleri") or [])]
+    check("PNG: olcu etiketleri kenara yakin (0,8-1,6 m)", bool(mes) and all(0.8 <= x <= 1.6 for x in mes), mes)
+    check("PNG: etiket-cizgi cakismasi yok", (resim.get("cakisan_etiket") or 0) == 0,
+          resim.get("cakisan_etiket"))
+    liders = resim.get("liderler") or []
+    check("PNG: lider uzunlugu <= 3 m", all(l.get("uzunluk_m", 0) <= 3.0 for l in liders),
+          [(l.get("kenar_m"), l.get("uzunluk_m")) for l in liders])
 
     # kisa kenarli sentetik parsel: liderler kenara bagli mi
     kisa = [(0, 0), (10, 0), (10, 10), (8, 10), (8, 9.2), (6, 9.2), (6, 10), (0, 10)]
@@ -394,6 +401,14 @@ def run_online():
             ayrik, en_alt = _etiketler_bandin_ustunde(t.get("svg", ""), t.get("sinir") or [0, 0, 0, 0],
                                                       t.get("band_ust") or 0)
             check("cizim %s/%s: etiketler bandin ustunde" % (_ada, _parsel), ayrik, en_alt)
+            _mes = [m["merkez_mesafe_m"] for m in (t.get("etiket_mesafeleri") or [])]
+            check("cizim %s/%s: etiketler kenara yakin (0,8-1,6 m)" % (_ada, _parsel),
+                  bool(_mes) and all(0.8 <= x <= 1.6 for x in _mes), _mes)
+            check("cizim %s/%s: cizgi cakismasi yok" % (_ada, _parsel),
+                  (t.get("cakisan_etiket") or 0) == 0, t.get("cakisan_etiket"))
+            check("cizim %s/%s: lider <=3 m" % (_ada, _parsel),
+                  all(l.get("uzunluk_m", 0) <= 3.0 for l in (t.get("liderler") or [])),
+                  [(l.get("kenar_m"), l.get("uzunluk_m")) for l in (t.get("liderler") or [])])
             _e2, _pv = cagir("parsel", {"il": "Rize", "ilce": "Merkez", "mahalle": _mah,
                                         "ada": _ada, "parsel": _parsel})
             _gj = (_pv or {}).get("geojson_dosya")
@@ -448,6 +463,22 @@ def run_online():
         proc.wait(timeout=10)
 
 
+def test_kurulum_dosyalari():
+    import subprocess
+    sh = os.path.join(HERE, "setup.sh")
+    check("setup.sh var ve calistirilabilir", os.path.exists(sh) and os.access(sh, os.X_OK), sh)
+    r = subprocess.run(["bash", "-n", sh], capture_output=True, text=True)
+    check("setup.sh sozdizimi (bash -n)", r.returncode == 0, r.stderr[:200])
+    r = subprocess.run(["bash", sh, "--help"], capture_output=True, text=True)
+    check("setup.sh --help kullanim yazar", r.returncode == 0 and "with-browser" in r.stdout, r.stdout[:120])
+    req = os.path.join(HERE, "requirements-optional.txt")
+    icerik = open(req, encoding="utf-8").read() if os.path.exists(req) else ""
+    check("requirements-optional.txt paketleri",
+          all(x in icerik for x in ("cairocffi", "cairosvg", "pypdf")), icerik[:80])
+    ga = os.path.join(HERE, ".gitattributes")
+    check(".gitattributes *.sh LF", os.path.exists(ga) and "*.sh text eol=lf" in open(ga, encoding="utf-8").read())
+
+
 def run_offline():
     print("MOD: offline (ag erisimi yok)\n")
     test_sema()
@@ -456,6 +487,7 @@ def run_offline():
     test_cizim()
     test_ozet_pdf_ve_birlestirme()
     test_paket_offline()
+    test_kurulum_dosyalari()
 
 
 def main(argv):

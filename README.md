@@ -89,7 +89,7 @@ Kurulum adımı yok: `pip install` gerekmez (opsiyonel PDF/kaynak-sayfa bağıml
 
 | Bileşen | Ne için | Yoksa |
 |---|---|---|
-| `playwright` + Chromium | `kaynak_sayfa` / `paket` kaynak PDF+PNG | `{"durum": "bagimlilik_yok"}`; paket özet PDF ile üretilir |
+| `playwright` + Chromium | `kaynak_sayfa` / `paket` kaynak PDF+PNG | `{"durum": "bagimlilik_yok", "kurulum": "./setup.sh --with-browser"}`; paket özet PDF ile üretilir |
 | `cairocffi` | Özet PDF | `ozet.pdf` atlanır, JSON/MD kalır |
 | `cairosvg` | SVG → PNG | `parsel.png` atlanır |
 | `pypdf` | Özet + kaynak PDF birleştirme | İki PDF ayrı kalır, `"birlestirme": "pypdf_yok"` notu |
@@ -130,8 +130,8 @@ aranabilirliği özet sayfalarda korunur.
 ## Testler
 
 ```bash
-python3 test_mcp.py            # offline: 31 kontrol (şema, alias, parser, DXF/PNG, PDF, birleştirme, ZIP, sayfa metrikleri)
-python3 test_mcp.py --online   # 32 kontrol: 2 gerçek parsel + kaynak sayfa + sayfa/görsel metrikleri
+python3 test_mcp.py            # offline: 39 kontrol (şema, alias, parser, DXF/PNG, PDF, birleştirme, ZIP, sayfa metrikleri)
+python3 test_mcp.py --online   # 38 kontrol: 2 gerçek parsel + kaynak sayfa + sayfa/görsel metrikleri
 ```
 
 Offline mod ağa çıkmaz: TKGM/imar/kaynak fonksiyonları fixture ve mock ile değiştirilir.

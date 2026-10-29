@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.0.5 — 2026-10-29
+
+- Ölçü yerleşimi: uzun kenarlarda etiket **1,0 m**, kısa kenarlarda **0,9-1,2 m**; çakışma
+  varsa 0,1 m adımlarla en fazla **1,5 m**'ye kadar dışa kaydırma. Lider toplam uzunluğu
+  **≤3 m** (0,45-0,75 m ölçüldü), aynı girintinin ikiz kısa kenarları tek etiketle gösteriliyor.
+- `cakisan_etiket` ve `etiket_mesafeleri` alanları eklendi; testlerde etiket-çizgi çakışması,
+  etiket mesafesi (0,8-1,6 m) ve lider uzunluğu (≤3 m) doğrulanıyor. Tuval kenarı %8→%4.
+- **Kurulum otomasyonu:** `setup.sh` (idempotent; Python ≥3.8 kontrolü, venv farkındalığı,
+  `--with-browser`), `requirements-optional.txt`, `.gitattributes` (`*.sh` LF).
+- `durum` aracı eksik bağımlılıkları ve kurulum komutunu döndürüyor; PDF/PNG/kaynak_sayfa
+  atlandığında neden + `./setup.sh` ipucu veriliyor.
+- Testler: **39 offline, 38 online**.
+
 ## v3.0.4 — 2026-10-29
 
 - Kısa kenar ölçüleri kopuk görünüyordu: lider çizgisi artık **her kısa kenarda** (L<3 m veya

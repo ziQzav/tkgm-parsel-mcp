@@ -1009,6 +1009,8 @@ def tool_cizim(args):
                       "cizildi": bool(cekme_poly)},
             "band_orani": resim.get("band_orani"), "band_ust": resim.get("band_ust"),
             "sinir": resim.get("sinir"), "liderler": resim.get("liderler"),
+            "cakisan_etiket": resim.get("cakisan_etiket"),
+            "etiket_mesafeleri": resim.get("etiket_mesafeleri"),
             "epsg": epsg, "merkez_boylam": lon0,
             "uyarilar": ([] if cekme_poly else ["Çekme sınırı çizilemedi (offset geçersiz)."]),
             "zaman": _ts()}
@@ -1151,27 +1153,36 @@ def tool_paket(args):
             "zip_icerik": sorted(icerik), "zaman": _ts()}
 
 
+def _bagimliliklar():
+    import importlib.util
+    adlar = {"cairocffi": "PDF (ozet.pdf / paket.pdf)",
+             "cairosvg": "PNG (parsel.png)",
+             "pypdf": "PDF birlestirme (paket.pdf)",
+             "playwright": "kaynak_sayfa (portal ekran goruntusu)"}
+    var, eksik = {}, []
+    for m in adlar:
+        ok = importlib.util.find_spec(m) is not None
+        var[m] = ok
+        if not ok:
+            eksik.append(m)
+    return var, eksik, adlar
+
+
 def tool_durum(_args):
     d = kaynak.durum()
-    try:
-        import cairosvg  # noqa: F401
-        svg = True
-    except Exception:
-        svg = False
-    try:
-        import cairocffi  # noqa: F401
-        pdf = True
-    except Exception:
-        pdf = False
-    try:
-        import pypdf  # noqa: F401
-        merge = True
-    except Exception:
-        merge = False
+    var, eksik, adlar = _bagimliliklar()
+    var["chromium"] = d["chromium"]
+    if not d["chromium"]:
+        eksik.append("chromium")
+    ipucu = None
+    if eksik:
+        tarayici = "playwright" in eksik or "chromium" in eksik
+        ipucu = "./setup.sh" + (" --with-browser" if tarayici else "")
     return {"sunucu": SERVER_NAME, "surum": SERVER_VERSION, "arac_sayisi": len(TOOLS),
-            "bagimliliklar": {"playwright": d["playwright"], "chromium": d["chromium"],
-                              "chromium_yolu": d["chromium_yolu"], "cairocffi": pdf,
-                              "cairosvg": svg, "pypdf": merge},
+            "bagimliliklar": var,
+            "eksik": eksik,
+            "eksik_aciklama": {k: adlar.get(k, "tarayici (kaynak_sayfa)") for k in eksik},
+            "kurulum": ipucu or "tamam (opsiyonel bagimliliklar hazir)",
             "cache": {"dizin": CACHE_DIR,
                       "dosya": len(os.listdir(CACHE_DIR)) if os.path.isdir(CACHE_DIR) else 0},
             "cikti_dizini": OUT_DIR,

@@ -256,6 +256,33 @@ def _metin_kutu(x, y, yazi, h, aci):
     return (x - ew / 2, y - eh / 2, x + ew / 2, y + eh / 2)
 
 
+def _kutu_cizgi_kesisir(k, a, b, eps=0.02):
+    """Eksen-hizali kutu ile dogru parcasinin kesisimi (Liang-Barsky)."""
+    x0, y0, x1, y1 = k[0] + eps, k[1] + eps, k[2] - eps, k[3] - eps
+    if x1 <= x0 or y1 <= y0:
+        return False
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t0, t1 = 0.0, 1.0
+    for p_, q_ in ((-dx, a[0] - x0), (dx, x1 - a[0]), (-dy, a[1] - y0), (dy, y1 - a[1])):
+        if abs(p_) < 1e-12:
+            if q_ < 0:
+                return False
+        else:
+            r = q_ / p_
+            if p_ < 0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+            if t0 > t1:
+                return False
+    return True
+
+
+def _kutu_kutu_kesisir(a, b, eps=0.02):
+    return not (a[2] + eps < b[0] or b[2] + eps < a[0] or
+                a[3] + eps < b[1] or b[3] + eps < a[1])
+
+
 def _kutu_birlestir(kutular):
     return (min(k[0] for k in kutular), min(k[1] for k in kutular),
             max(k[2] for k in kutular), max(k[3] for k in kutular))
@@ -274,7 +301,12 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
     kutular = [(min(xs), min(ys), max(xs), max(ys))]
     yazilan = []
     liderler = []
+    etiket_mesafeleri = []
+    kullanilan_kenar = []
     h_e = h_txt * 0.8            # etiket yazi boyu
+    kenarlar = [(parse[i], parse[(i + 1) % len(parse)]) for i in range(len(parse))]
+    if cekme_poly:
+        kenarlar += [(cekme_poly[i], cekme_poly[(i + 1) % len(cekme_poly)]) for i in range(len(cekme_poly))]
     for i in range(len(parse)):
         a, b = parse[i], parse[(i + 1) % len(parse)]
         mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
@@ -285,35 +317,51 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
         nx, ny = dy / L, -dx / L
         if icinde((mx + nx * (max(2.5, g * 0.05) + 0.6), my + ny * (max(2.5, g * 0.05) + 0.6)), parse):
             nx, ny = -nx, -ny
-        kisa = L < 3.0
-        ofs = min(8.0, 4.0) if kisa else max(2.5, g * 0.05)
-        if kisa:
-            ofs = min(8.0, max(3.0, 0.9 * L + 1.2))
-        px, py = mx + nx * ofs, my + ny * ofs
-        # cok yakin iki etiket (or. ayni girintinin iki 0,84 m kenari) ust uste yazilmasin
-        if any(math.hypot(px - q[0], py - q[1]) < 1.4 * h_txt for q in yazilan):
+        # ayni girintinin iki kisa kenari (or. iki 0,84 m) tek etiketle gosterilir
+        if any(math.hypot(mx - q[0], my - q[1]) < 2.0 for q in kullanilan_kenar):
             continue
-        yazilan.append((px, py))
+        kisa = L < 3.0
+        # yazi kenara yakin: uzun kenar 1,0 m; kisa kenar 0,9-1,2 m
+        ofs = 0.9 if L < 1.0 else (1.2 if kisa else 1.0)
         aci = math.degrees(math.atan2(dy, dx))
         if aci > 90:
             aci -= 180
         elif aci < -90:
             aci += 180
         if kisa:
-            aci = 0.0                       # kisa kenar: yatay yaz
+            aci = 0.0
+        yazi = "%s m" % _tr(L)
+        px, py = mx + nx * ofs, my + ny * ofs
+        kutu = _metin_kutu(px, py, yazi, h_e, aci)
+        # cakisma: baska etiket / kenar cizgisi -> 0,2 m adimla disa (toplam en fazla 1,5 m)
+        adim = 0.0
+        while ofs + adim < 1.5 - 1e-9:
+            cak = any(_kutu_kutu_kesisir(kutu, kb) for kb in kutular[1:]) or \
+                  any(_kutu_cizgi_kesisir(kutu, a2, b2) for a2, b2 in kenarlar)
+            if not cak:
+                break
+            adim = round(adim + 0.1, 2)
+            px, py = mx + nx * (ofs + adim), my + ny * (ofs + adim)
+            kutu = _metin_kutu(px, py, yazi, h_e, aci)
+        if any(math.hypot(px - q[0], py - q[1]) < 1.2 * h_txt for q in yazilan):
+            continue
+        yazilan.append((px, py))
+        kullanilan_kenar.append((mx, my))
+        etiket_mesafeleri.append({"kenar_m": round(L, 2),
+                                  "merkez_mesafe_m": round(math.hypot(px - mx, py - my), 2)})
         # lider: kenar orta noktasindan (poligon uzerinde) etiket kutusunun kenarina kadar
-        lider_gerekli = kisa or ofs > 0.6 * L
+        lider_gerekli = kisa
         if lider_gerekli:
-            bosluk = 0.55 * h_e + 0.15 * h_txt
+            bosluk = 0.55 * h_e + 0.12 * h_txt
             ex, ey = px - nx * bosluk, py - ny * bosluk
             ent.append({"tip": "line", "katman": "CIZGI", "a": (mx, my), "b": (ex, ey)})
             liderler.append({"kenar_m": round(L, 2), "baslangic": [round(mx, 2), round(my, 2)],
                              "bitis": [round(ex, 2), round(ey, 2)],
+                             "uzunluk_m": round(math.hypot(ex - mx, ey - my), 2),
                              "baslangic_kenar_mesafe_m": 0.0})
-        yazi = "%s m" % _tr(L)
         ent.append({"tip": "text", "katman": "OLCU", "x": px, "y": py, "yazi": yazi,
                     "h": h_e, "aci": aci, "arka": True})
-        kutular.append(_metin_kutu(px, py, yazi, h_e, aci))
+        kutular.append(kutu)
 
     kb = _kutu_birlestir(kutular)
     # kuzey oku ve olcek cubugu icerik kutusunun disinda, banda degmeyecek sekilde
@@ -328,7 +376,7 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
                             max(e["a"][0], e["b"][0]), max(e["a"][1], e["b"][1])))
     kb = _kutu_birlestir(kutular)
     ic_w, ic_h = kb[2] - kb[0], kb[3] - kb[1]
-    pad = 0.03 * max(ic_w, ic_h)
+    pad = 0.04 * max(ic_w, ic_h)
 
     # baslik bandi: tuval yuksekliginin %12'si (en az 3 satir)
     gap = max(2.2 * h_txt, 0.05 * ic_h)
@@ -359,9 +407,13 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
     png = os.path.join(out_dir, "parsel.png")
     arac = png_uret(svg, png)
     return {"svg": svg, "png": png if arac else None, "png_arac": arac,
+            "png_kurulum": None if arac else "./setup.sh (cairosvg)",
             "band_orani": round(band / (sinir[3] - sinir[1]), 3),
             "band_ust": round(y_alt, 3),
             "liderler": liderler,
+            "etiket_mesafeleri": etiket_mesafeleri,
+            "cakisan_etiket": sum(1 for kb2 in kutular[1:]
+                                  if any(_kutu_cizgi_kesisir(kb2, a3, b3) for a3, b3 in kenarlar)),
             "sinir": [round(v, 2) for v in sinir]}
 
 
