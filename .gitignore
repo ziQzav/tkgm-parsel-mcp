@@ -1,6 +1,5 @@
 cache/
 cikti/
-arastirma/
 __pycache__/
 *.pyc
 .venv/

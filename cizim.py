@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Vaziyet cizimi (SVG + PNG) — hesap yok, yalnizca parsel + gecerli cekme siniri."""
+
+import math
+import os
+import shutil
+import subprocess
+
+VARSAYILAN_KORIDOR = 2.0
+
+
+def alan(pts):
+    s = 0.0
+    for i in range(len(pts)):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % len(pts)]
+        s += x1 * y2 - x2 * y1
+    return s / 2.0
+
+
+def ccw(pts):
+    return pts if alan(pts) > 0 else list(reversed(pts))
+
+
+def _kesisim(a1, a2, b1, b2):
+    x1, y1 = a1
+    x2, y2 = a2
+    x3, y3 = b1
+    x4, y4 = b2
+    d = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(d) < 1e-12:
+        return None
+    px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / d
+    py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / d
+    return px, py
+
+
+def icinde(pt, poly):
+    x, y = pt
+    n = len(poly)
+    ic = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi):
+            ic = not ic
+        j = i
+    return ic
+
+
+def basit_mi(poly):
+    """Komsu olmayan kenarlar kesisiyor mu (offset gecerliligi)."""
+    n = len(poly)
+
+    def kes(a1, a2, b1, b2):
+        def yon(p, q, r):
+            return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        d1, d2 = yon(a1, a2, b1), yon(a1, a2, b2)
+        d3, d4 = yon(b1, b2, a1), yon(b1, b2, a2)
+        return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+    for i in range(n):
+        for j in range(i + 2, n):
+            if i == 0 and j == n - 1:
+                continue
+            if kes(poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n]):
+                return False
+    return True
+
+
+def offset_polygon(pts, d):
+    """Parseli d kadar iceri oteler (paralel offset). Gecersizse None."""
+    p = ccw(list(pts))
+    n = len(p)
+    if d <= 0:
+        return p
+    cizgiler = []
+    for i in range(n):
+        x1, y1 = p[i]
+        x2, y2 = p[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            return None
+        nx, ny = -dy / L, dx / L
+        cizgiler.append(((x1 + nx * d, y1 + ny * d), (x2 + nx * d, y2 + ny * d)))
+    out = []
+    for i in range(n):
+        a1, a2 = cizgiler[(i - 1) % n]
+        b1, b2 = cizgiler[i]
+        pt = _kesisim(a1, a2, b1, b2)
+        if pt is None:
+            return None
+        out.append(pt)
+    if alan(out) <= 1.0 or not all(icinde(q, p) for q in out):
+        return None
+    if not basit_mi(out):
+        return None
+    return out
+
+
+def guvenli_offset(pts, d):
+    for k in range(8):
+        r = offset_polygon(pts, d * (0.75 ** k))
+        if r:
+            return r, d * (0.75 ** k)
+    return None, 0.0
+
+
+# ---------------------------------------------------------------- SVG/PNG
+
+def _ascii(t):
+    return (str(t).replace("ı", "i").replace("İ", "I").replace("ğ", "g").replace("Ğ", "G")
+            .replace("ş", "s").replace("Ş", "S").replace("ç", "c").replace("Ç", "C")
+            .replace("ö", "o").replace("Ö", "O").replace("ü", "u").replace("Ü", "U")
+            .replace("²", "2").replace("—", "-").replace("·", "-"))
+
+
+def _tr(v, ond=2):
+    try:
+        t = ("%%.%df" % ond) % float(v)
+    except (TypeError, ValueError):
+        return "-"
+    return t.replace(".", ",")
+
+
+def kuzey_oku(x, y, h):
+    return [
+        {"tip": "line", "katman": "KROKI", "a": (x, y), "b": (x, y + h * 2)},
+        {"tip": "line", "katman": "KROKI", "a": (x - h * 0.35, y + h * 1.3), "b": (x, y + h * 2)},
+        {"tip": "line", "katman": "KROKI", "a": (x + h * 0.35, y + h * 1.3), "b": (x, y + h * 2)},
+        {"tip": "text", "katman": "KROKI", "x": x, "y": y + h * 2.4, "yazi": "K", "h": h * 0.8},
+    ]
+
+
+def olcek_cubugu(x, y, uzunluk, etiket, h):
+    return [
+        {"tip": "line", "katman": "OLCU", "a": (x, y), "b": (x + uzunluk, y)},
+        {"tip": "line", "katman": "OLCU", "a": (x, y - h * 0.3), "b": (x, y + h * 0.6)},
+        {"tip": "line", "katman": "OLCU", "a": (x + uzunluk, y - h * 0.3), "b": (x + uzunluk, y + h * 0.6)},
+        {"tip": "text", "katman": "OLCU", "x": x + uzunluk / 2, "y": y - h * 0.9, "yazi": etiket, "h": h},
+    ]
+
+
+def svg_yaz(path, entities, baslik):
+    xs, ys = [], []
+    for e in entities:
+        if e.get("tip") == "polyline":
+            for x, y in e.get("noktalar") or []:
+                xs.append(x)
+                ys.append(y)
+        elif e.get("tip") == "line":
+            for q in (e["a"], e["b"]):
+                xs.append(q[0])
+                ys.append(q[1])
+        elif e.get("tip") == "text":
+            xs.append(e["x"])
+            ys.append(e["y"])
+    if not xs:
+        xs, ys = [0.0, 1.0], [0.0, 1.0]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    pad = max(x1 - x0, y1 - y0) * 0.06 + 0.5
+    vx, vy = x0 - pad, -(y1 + pad)
+    vw, vh = (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad
+
+    def tx(x):
+        return x - vx
+
+    def ty(y):
+        return -y - vy
+
+    parca = []
+    for e in entities:
+        tip, k = e.get("tip"), (e.get("katman") or "0").lower()
+        if tip == "polyline":
+            pts = " ".join("%.2f,%.2f" % (tx(x), ty(y)) for x, y in e.get("noktalar") or [])
+            parca.append('<polygon points="%s" class="%s"/>' % (pts, k))
+        elif tip == "line":
+            parca.append('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" class="%s"/>'
+                         % (tx(e["a"][0]), ty(e["a"][1]), tx(e["b"][0]), ty(e["b"][1]), k))
+        elif tip == "text":
+            yazi = _ascii(e.get("yazi", "")).replace("&", "&amp;").replace("<", "&lt;")
+            aci = -float(e.get("aci", 0.0))
+            rot = (' transform="rotate(%.2f %.2f %.2f)"' % (aci, tx(e["x"]), ty(e["y"]))) if aci else ""
+            parca.append('<text x="%.2f" y="%.2f" font-size="%.2f" class="%s"%s>%s</text>'
+                         % (tx(e["x"]), ty(e["y"]), e.get("h", 1.0) * 0.9, k, rot, yazi))
+
+    svg = """<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="%.0f" viewBox="0 0 %.2f %.2f">
+<style>
+  polygon {stroke-linejoin:round}
+  .parsel {fill:#dcfce7;fill-opacity:0.35;stroke:#15803d;stroke-width:0.12}
+  .cekme {fill:none;stroke:#d97706;stroke-width:0.07;stroke-dasharray:0.6 0.4}
+  .olcu {fill:#b91c1c;stroke:none;font-family:sans-serif;text-anchor:middle}
+  .kroki {fill:#111827;stroke:none;font-family:sans-serif;text-anchor:middle}
+  .olculine {stroke:#dc2626;stroke-width:0.05}
+  text {dominant-baseline:middle;text-anchor:middle}
+</style>
+<rect x="0" y="0" width="%.2f" height="%.2f" fill="#ffffff"/>
+<title>%s</title>
+%s
+</svg>
+""" % (1400.0 * vh / vw if vw else 900, vw, vh, vw, vh, _ascii(baslik), "\n".join(parca))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(svg)
+    return path
+
+
+def png_uret(svg_path, png_path):
+    try:
+        import cairosvg
+        cairosvg.svg2png(url=svg_path, write_to=png_path, output_width=1600)
+        return "cairosvg"
+    except Exception:
+        pass
+    for cmd in (["rsvg-convert", "-w", "1600", "-o", png_path, svg_path],
+                ["convert", "-density", "200", svg_path, png_path]):
+        exe = shutil.which(cmd[0])
+        if exe:
+            try:
+                subprocess.run([exe] + cmd[1:], check=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=60)
+                if os.path.exists(png_path):
+                    return cmd[0]
+            except Exception:
+                continue
+    return None
+
+
+def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, baslik="VAZIYET 1/500"):
+    """Parsel + cekme siniri + olculer + kuzey + olcek. Donus: {svg,png,png_arac}."""
+    xs = [p[0] for p in parse]
+    ys = [p[1] for p in parse]
+    g = max(max(xs) - min(xs), max(ys) - min(ys))
+    h_txt = max(0.8, g * 0.022)
+    ent = [{"tip": "polyline", "katman": "PARSEL", "noktalar": parse}]
+    if cekme_poly:
+        ent.append({"tip": "polyline", "katman": "CEKME", "noktalar": cekme_poly})
+
+    for i in range(len(parse)):
+        a, b = parse[i], parse[(i + 1) % len(parse)]
+        mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        aci = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        if aci > 90:
+            aci -= 180
+        elif aci < -90:
+            aci += 180
+        ent.append({"tip": "text", "katman": "OLCU", "x": mx, "y": my,
+                    "yazi": "%s m" % _tr(L), "h": h_txt * 0.8, "aci": aci})
+
+    y = min(ys) - h_txt * 2.5
+    satirlar = ["ADA/PARSEL: %s" % kimlik,
+                "ALAN: %s m2 | OLCEK 1/500" % _tr(alan_m2)]
+    if cekme_poly:
+        satirlar.append("CEKME: %s/%s/%s m" % (_tr(cekme_degerleri[0], 1),
+                                               _tr(cekme_degerleri[1], 1),
+                                               _tr(cekme_degerleri[2], 1)))
+    else:
+        satirlar.append("CEKME SINIRI CIZILEMEDI (offset gecersiz)")
+    for s_ in satirlar:
+        ent.append({"tip": "text", "katman": "KROKI", "x": (min(xs) + max(xs)) / 2, "y": y,
+                    "yazi": s_, "h": h_txt * 0.8})
+        y -= h_txt * 1.4
+    ent += kuzey_oku(max(xs) + h_txt, max(ys) - h_txt, h_txt * 0.8)
+    ent += olcek_cubugu(min(xs), min(ys) - h_txt * 9, 20.0, "20 m", h_txt * 0.7)
+
+    os.makedirs(out_dir, exist_ok=True)
+    svg = svg_yaz(os.path.join(out_dir, "parsel.svg"), ent, "%s - %s" % (baslik, kimlik))
+    png = os.path.join(out_dir, "parsel.png")
+    arac = png_uret(svg, png)
+    return {"svg": svg, "png": png if arac else None, "png_arac": arac}

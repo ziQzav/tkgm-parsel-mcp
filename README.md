@@ -1,54 +1,70 @@
-# mcp-parsel-imar — TKGM parsel + imar durumu (tek MCP sunucusu)
+# parsel-imar v3 — çizim öncesi bilgi toplama MCP
 
-İki ayrı MCP'yi tek stdio sunucusunda birleştirir:
+Parsel + imar bilgisini toplar, **kaynak portalın kendi sonuç sayfasını birebir** pakete koyar.
+Hesap, maliyet, kural motoru **yoktur**; ürün "karar öncesi bilgi dosyası" üretir.
 
-- **TKGM kadastro** (7 araç): il/ilçe/mahalle listeleri, ada/parsel sorgusu, koordinattan parsel, DXF (EPSG 5253–5262, saf stdlib TM).
-- **e-İmar** (4 araç): Netcad KEOS tabanlı 20 ilin **13'ünde** ada/parsel ile imar durumu (emsal, TAKS, KAKS, kat, nizam, H, çekme, plan notu).
-- **Birleşik** (1 araç): `parsel_imar` — tek çağrıda TKGM + imar + **IMAR katmanlı DXF**.
+![Özet PDF — sayfa 1](docs/ornek_ozet_s1.png)
 
-Harici bağımlılık **yoktur**: Python 3.8+ standart kütüphanesi. Resmî API değildir; portalların kendi uçları kullanılır.
-
-## Çalışan iller (13) — hepsi Netcad KEOS e-İmar
-
-İmar sorgusu, il belediyelerinin **Netcad KEOS** (bazılarında BELNET/e-Belediye adıyla) imar modülünden okunur.
-Aynı servis ailesi, il bazında farklı URL ve HTML tablosu kullanır; tek adaptör + il config ile çözülür.
-`svc_nonce` cookie'si ile `X-Service-Nonce` header'ı eşit olmalıdır (yoksa HTTP 403).
-
-| # | İl | KEOS portalı | Not |
-|---|---|---|---|
-| 1 | Amasya | `keos.amasya.bel.tr/imardurumu` | — |
-| 2 | Burdur | `keos.burdur.bel.tr:444/imardurumu` | — |
-| 3 | Diyarbakır | `cbs.diyarbakir.bel.tr/imardurumu` | bazı parsellerde plan yok |
-| 4 | Isparta | `keos.isparta.bel.tr/imardurumu` | bazı parsellerde plan yok |
-| 5 | Kırşehir | `keos.kirsehir.bel.tr/imardurumu` | http |
-| 6 | Nevşehir | `keos.nevsehir.bel.tr/imardurumu` | sertifika zinciri doğrulanamıyor (hosta özel) |
-| 7 | Niğde | `keos.nigde.bel.tr/imardurumu` | — |
-| 8 | Rize | `keos.rize.bel.tr:444/imardurumu` | — |
-| 9 | Sivas | `keos.sivas.bel.tr/imardurumu` | sertifika zinciri doğrulanamıyor (hosta özel) |
-| 10 | Tunceli | `cbs.tunceli.bel.tr/imardurumu` | http |
-| 11 | Şanlıurfa | `keos.sanliurfa.bel.tr/imardurumu` | ISO-8859-9 |
-| 12 | Uşak | `keos.usak.bel.tr/imardurumu` | — |
-| 13 | Aksaray | `ebelediye.aksaray.bel.tr:444/imardurumu` | ISO-8859-9 |
-
-**Kapsam dışı (7):** Adana ve Samsun (kurumsal giriş), Giresun (bakımda), Kahramanmaraş (reCAPTCHA), Tokat (imar modülü 404), Van (HTTP 503), Hatay (imar sayfası yanıt vermiyor).
-Bu illerde `parsel_imar` yine TKGM kadastro verisini döndürür; imar alanında `hata_tipi: "imar_kapsam_disi"` + engel + portal linki bulunur. Giriş yapılmaz, captcha çözülmez.
-
-![IMAR katmanlı DXF](docs/onizleme_rize_imar.png)
+![Kaynak sayfa (portalın kendi çıktısı)](docs/ornek_kaynak_tam.png)
 
 ---
 
-## Kurulum
+## v2'den farkı (ne kaldırıldı, neden)
+
+| Kaldırılan | Neden |
+|---|---|
+| `maliyet.py` (arsa/inşaat/proje/KDV/finansman) | Güvenilmez: birim fiyatlar ve oranlar doğrulanamıyor; kullanıcı kararı |
+| `onproje.py` hesap motoru (kat, daire, dükkan, otopark, sığınak) | Kafa karıştırıyor; bu bir tasarım/fizibilite kararı, MCP işi değil |
+| Kural motoru (`kural_*`, `kurallar/*.json`) | Kaynak URL'ler doğrulanamıyordu; tazelik sürekli `DOGRULANMADI` kalıyordu |
+| Ölü kod (~210 satır) | `tr_lower`, `IMAR_OUT_DIR`, `_ozel_notlar`, `imar_link`, `dxf_yaz`, `_svg_rect`, `kat_plani`, `birim_yerlesimi` |
+
+Yerine gelen: **kaynak sayfa** (portalın `imar.aspx` çıktısı, harita + tablo) ve 3 sayfalık özet.
+
+## Araçlar (8)
+
+| Araç | Parametreler | Döndürdüğü |
+|---|---|---|
+| `parsel` | `il, ilce, mahalle, ada, parsel` **veya** `lat, lon` | TKGM: alan, nitelik, pafta, mevkii, zemin/KM, geometri + GeoJSON |
+| `imar_sorgula` | `il, ilce, mahalle, ada, parsel` | Emsal, TAKS, KAKS, H, kat, nizam, çekme, plan adı, kullanım, plan notları, kaynak URL |
+| `imar_kapsam` | — | 20 il: portal, durum (13 aktif / 7 kapsam dışı) |
+| `liste` | `tur=il\|ilce\|mahalle\|imar_il\|imar_ilce\|imar_mahalle` | TKGM ve portal listeleri |
+| `cizim` | `…, crs=tm\|wgs84\|both` | `parsel.dxf` (R12, PARSEL + IMAR katmanı) + `parsel.png` (1/500 vaziyet) |
+| `kaynak_sayfa` | `…, tkgm?` | Portalın `imar.aspx` sayfası: print-PDF + tam sayfa PNG (+ varsa imar planı PDF) |
+| `paket` | `…, kaynak_dahil?, kaynak_sayfa_tkgm?` | **Tek çağrı:** parsel + imar + çizim + kaynak sayfa + 3 sayfalık özet → `paket.pdf` + ZIP |
+| `durum` | — | Sürüm, bağımlılık durumu, cache, imar kapsamı, son hata |
+
+**Geri uyum (1 sürüm):** `parsel_bul`→`parsel`, `parsel_sorgula`→`parsel`,
+`parsel_sorgula_koordinat`→`parsel`, `parsel_dxf`→`cizim`, `parsel_imar`→`paket`,
+`dosya_olustur`→`paket`, `imar_iller_listele`→`imar_kapsam`.
+`on_proje` ve `kural_*` çağrılırsa net hata: *"v3'te kaldırıldı: hesap/maliyet yok"*.
+
+## Paket içeriği
+
+`cikti/v3/<Mahalle>_<Ada>_<Parsel>/`
+
+| Dosya | Kaynak |
+|---|---|
+| `ozet.pdf` | Bizim özetimiz — 3 sayfa, A4, gömülü DejaVu, TR sayı biçimi |
+| `kaynak_imar.pdf` | Portalın `imar.aspx` sayfası (print CSS, harita + tablo) |
+| `kaynak_imar.png` | Aynı sayfanın tam sayfa görüntüsü (1280 px genişlik) |
+| `paket.pdf` | **Özet (3) + kaynak (2) = 5+ sayfa**, tek PDF |
+| `parsel.dxf` | R12, kapalı POLYLINE, `PARSEL` + `IMAR` etiket katmanı |
+| `parsel.png` | 1/500 vaziyet: parsel, çekme sınırı (yalnız geçerli offset), ölçü, kuzey, ölçek |
+| `rapor.json` / `rapor.md` | Tek şema: `{sorgu, parsel, imar, kaynak_sayfa, cizim, uyarilar, zaman}` |
+| `paket.zip` | Yukarıdakilerin tamamı (deflate) |
+
+Özet PDF sayfaları: **1** kapak + TKGM tablosu, **2** imar tablosu + plan notları, **3** çizim (PNG).
+Kaynak sayfa(lar) hemen ardından birebir eklenir — veri elle yeniden dizilmez.
+
+## Kurulum ve çalıştırma
 
 ```bash
 git clone https://github.com/ziQzav/tkgm-parsel-mcp.git
 cd tkgm-parsel-mcp
-python3 --version        # 3.8+
-python3 server.py         # stdio, satır bazlı JSON-RPC 2.0
+python3 server.py          # stdio JSON-RPC
 ```
 
-Kurulum adımı yok: `pip install` veya sanal ortam gerekmez.
-
-MCP istemci yapılandırması (yol sizin makinenize göre):
+Kurulum adımı yok: `pip install` gerekmez (opsiyonel PDF/kaynak-sayfa bağımlılıkları aşağıda).
 
 ```json
 {
@@ -56,161 +72,58 @@ MCP istemci yapılandırması (yol sizin makinenize göre):
     "parsel-imar": {
       "command": "python3",
       "args": ["/PROJE/YOLU/tkgm-parsel-mcp/server.py"],
-      "env": {
-        "PARSELIMAR_CIKTI": "/PROJE/YOLU/tkgm-parsel-mcp/cikti",
-        "PARSELIMAR_CACHE": "/PROJE/YOLU/tkgm-parsel-mcp/cache"
-      }
+      "env": {"PARSELIMAR_CIKTI": "/PROJE/YOLU/tkgm-parsel-mcp/cikti",
+              "PARSELIMAR_CACHE": "/PROJE/YOLU/tkgm-parsel-mcp/cache"}
     }
   }
 }
 ```
 
-OpenCode karşılığı:
+### Opsiyonel bağımlılıklar
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "parsel-imar": {
-      "type": "local",
-      "command": ["python3", "/PROJE/YOLU/tkgm-parsel-mcp/server.py"],
-      "enabled": true
-    }
-  }
-}
-```
-
----
-
-## Araçlar (12)
-
-| Araç | Parametreler | Döndürdüğü |
+| Bileşen | Ne için | Yoksa |
 |---|---|---|
-| `iller_listele` | — | 81 il (plaka kodu id) |
-| `ilceler_listele` | `il_id` | TKGM ilçeleri |
-| `mahalleler_listele` | `ilce_id` | TKGM mahalleleri |
-| `parsel_sorgula` | `mahalle_id, ada, parsel` | TKGM özeti + GeoJSON |
-| `parsel_bul` | `il_adi, ilce_adi, mahalle_adi, ada, parsel` | İsimden id çözer + özet |
-| `parsel_sorgula_koordinat` | `lat, lon` | Noktadaki kadastral parsel |
-| `parsel_dxf` | `…, crs: tm\|wgs84\|both` | DXF (PARSEL + PARSEL_ETIKET) |
-| `imar_iller_listele` | — | 20 il: durum, portal, engel notu |
-| `imar_ilceler_listele` | `il` | Portalın ilçe listesi |
-| `imar_mahalleler_listele` | `il, ilce` | İdari + tapu mahalleleri |
-| `imar_sorgula` | `il, ilce, mahalle, ada, parsel` | İmar kaydı (tek portal) |
-| `parsel_imar` | `il, ilce, mahalle, ada, parsel, dxf=true, crs="tm"` | **TKGM + imar + DXF tek çağrıda** |
+| `playwright` + Chromium | `kaynak_sayfa` / `paket` kaynak PDF+PNG | `{"durum": "bagimlilik_yok"}`; paket özet PDF ile üretilir |
+| `cairocffi` | Özet PDF | `ozet.pdf` atlanır, JSON/MD kalır |
+| `cairosvg` | SVG → PNG | `parsel.png` atlanır |
+| `pypdf` | Özet + kaynak PDF birleştirme | İki PDF ayrı kalır, `"birlestirme": "pypdf_yok"` notu |
+| DejaVu Sans | Türkçe karakter | PDF atlanır |
 
-`parsel_imar` imar bulamazsa TKGM verisini yine döndürür; imar alanında
-`hata_tipi: "imar_kapsam_disi"` + `engel` (giris_gerekli / captcha / bakimda / …) + portal linki olur.
+Chromium yolu otomatik bulunur (`~/.cache/ms-playwright/chromium-*/...`), gerekirse
+`PLAYWRIGHT_CHROMIUM=/yol/chrome` ile verilir. **Çekirdek araçlar (parsel, imar, liste, cizim) bu
+bağımlılıkları kullanmaz.**
 
-## Gerçek örnekler (2026-10-29 ölçümü)
+## Gerçek çıktılar (2026-10-29)
 
-**Rize / Merkez / Tophane 157/59**
+| Parsel | paket.pdf | kaynak_imar.pdf | ZIP | Not |
+|---|---|---|---|---|
+| Rize/Tophane 157/59 | 5 sayfa · 838 KB | 697 KB | 3,1 MB | kaynak 2 sayfa |
+| Aksaray/Kılıçarslan 668/214 | 6 sayfa · 456 KB | 313 KB | 2,0 MB | kaynak 3 sayfa |
 
-```json
-{
-  "tkgm": {"alan_m2": 640.26, "nitelik": "Kargir Ev Ve Arsası", "koordinat_sayisi": 9},
-  "imar": {"plan_adi": "RİZE (MERKEZ) REVİZYON UYGULAMA İMAR PLANI",
-           "emsal": 3.0, "kaks": 3.0, "taks": null, "bina_yuksekligi_m": 30.5,
-           "kullanim_karari": "Yerleşik Konut Alanı", "durum": "ok"},
-  "dxf": {"dosya": "cikti/Tophane_157_59_tm.dxf", "epsg": 5258, "imar_katmani": true}
-}
-```
+`paket` süresi: Rize **8,8 sn** (kaynak sayfa 8,3 sn), aynı anda özet+DXF+PNG+ZIP.
 
-**Aksaray / Merkez / Kılıçarslan 668/214**
+## Sınırlar
 
-```json
-{
-  "tkgm": {"alan_m2": 551.29, "nitelik": "5 Katlı Betonarme Apartman Ve Arsası"},
-  "imar": {"plan_adi": "AKSARAY 1/1000 OLÇEKLI REVIZYON UYGULAMA IMAR PLANI",
-           "emsal": 1.8, "kaks": 1.8, "taks": 0.4, "kat_sayisi": 4,
-           "yapi_nizami": "A", "kullanim_karari": "Konut Alanı"},
-  "dxf": {"dosya": "cikti/Kiliçarslan_668_214_tm.dxf", "epsg": 5255, "imar_katmani": true}
-}
-```
-
-Diğer doğrulananlar: **Tunceli** 276/9 → emsal 1,20 · H 16,5 m; **Niğde** 104/5 → emsal 0,10 · TAKS 0,05 · kat 2;
-**Burdur** 412/20 → kat 2 · nizam BİTİŞİK; **Amasya** 2061/13 → plan + açıklama notu.
-
-## 20 il kapsam matrisi
-
-Ölçüm: 2026-10-29, tek parsel/il, seri istek (≥500 ms). "Nonce" = `svc_nonce` cookie == `X-Service-Nonce` header zorunlu mu.
-
-| # | İl | Portal | Nonce | imar.aspx tablosu | Ada/parsel | Durum |
-|---|---|---|---|---|---|---|
-| 1 | Adana | keos.adana.bel.tr/BELNET | — | — | — | 🔴 giriş gerekli (kurumsal login) |
-| 2 | Amasya | keos.amasya.bel.tr/imardurumu | ✔ | ✔ | 2061/13 | 🟢 aktif |
-| 3 | Burdur | keos.burdur.bel.tr:444/imardurumu | ✔ | ✔ | 412/20 | 🟢 aktif |
-| 4 | Diyarbakır | cbs.diyarbakir.bel.tr/imardurumu | ✔ | ✔ | 150/4 | 🟢 aktif (parselde plan yok: "Nazım İmar Planı Mevcut Değil") |
-| 5 | Giresun | keos.giresun.bel.tr/imardurumu | ✔ | ✖ (maintenance.aspx) | — | 🔴 bakımda |
-| 6 | Hatay | keos.hatay.bel.tr/imardurumu | ✖ | ✖ (45 sn timeout) | — | 🔴 imar sayfası yanıt vermiyor |
-| 7 | Isparta | keos.isparta.bel.tr/imardurumu | ✔ | ✔ | 140/29 | 🟢 aktif (parselde plan yok) |
-| 8 | Kırşehir | keos.kirsehir.bel.tr/imardurumu (http) | ✔ | ✔ | 363/147 | 🟢 aktif |
-| 9 | Kahramanmaraş | keos.kahramanmaras.bel.tr/imardurumu | ✔ | ✖ (recaptcha.aspx) | — | 🔴 captcha |
-| 10 | Nevşehir | keos.nevsehir.bel.tr/imardurumu | ✔ | ✔ | 3435/350 | 🟢 aktif (TLS: sertifika zinciri doğrulanamıyor, hosta özel `CERT_NONE`) |
-| 11 | Niğde | keos.nigde.bel.tr/imardurumu | ✔ | ✔ | 104/5 | 🟢 aktif |
-| 12 | Rize | keos.rize.bel.tr:444/imardurumu | ✔ | ✔ | 157/59 | 🟢 aktif |
-| 13 | Samsun | cbs.samsun.bel.tr/BELNET | — | — | — | 🔴 giriş gerekli |
-| 14 | Sivas | keos.sivas.bel.tr/imardurumu | ✔ | ✔ | 6481/1 | 🟢 aktif (hosta özel `CERT_NONE`) |
-| 15 | Tokat | keos.tokat.bel.tr | — | — | — | 🔴 imar modülü 404 |
-| 16 | Tunceli | cbs.tunceli.bel.tr/imardurumu (http) | ✔ | ✔ | 276/9 | 🟢 aktif |
-| 17 | Şanlıurfa | keos.sanliurfa.bel.tr/imardurumu | ✖ | ✔ | 107/3 | 🟢 aktif (ISO-8859-9) |
-| 18 | Uşak | keos.usak.bel.tr/imardurumu | ✔ | ✔ | 1109/7 | 🟢 aktif |
-| 19 | Van | cbs.van.bel.tr/keos | — | — | — | 🔴 HTTP 503 |
-| 20 | Aksaray | ebelediye.aksaray.bel.tr:444/imardurumu | ✖ | ✔ | 668/214 | 🟢 aktif (ISO-8859-9) |
-
-**13 aktif / 7 kapsam dışı.** Kapsam dışı iller için `parsel_imar` yine TKGM verisini döndürür, imar alanında engel + portal linki verir; uydurma veri üretilmez.
-
-### Farklı HTML şablonları
-
-Aynı KEOS servisi il bazında farklı tablo etiketleri kullanıyor; alan eşlemesi etiket sözlüğüyle yapılıyor:
-
-| Şablon | Etiket örnekleri | İller |
-|---|---|---|
-| A (klasik) | `Mer'i İmar Planı`, `Fonksiyon`, `T.A.K.S`, `K.A.K.S (Emsal)`, `Bina Yüksekliği` | Amasya, Kırşehir, Rize, Tunceli, Şanlıurfa |
-| B (yeni) | `YÜRÜRLÜKTEKİ İMAR PLANI` (bölüm başlığı), `Plan Fonksiyonu`, `Yükseklik`, `T.A.K.S.`, `Ada / Parsel` | Burdur, Diyarbakır, Isparta, Uşak |
-| C | `Fonksiyon Adı`, `Plan Onama Tarihi` | Niğde |
-| D | `Meri İmar Planı`, `Kroki Ölçeği`, `İdari Mahallesi` | Sivas |
-| E | `Plan Fonksiyon`, `Plan Onay Tarih/Sayısı` | Aksaray |
-| F | `KMLDOWNLOAD`, `Mer'i İmar Planı / Tadilatın Konusu` | Nevşehir |
-
-## DXF ve IMAR katmanı
-
-`crs=tm` (varsayılan) / `wgs84` / `both`. Katmanlar:
-
-| Katman | İçerik |
-|---|---|
-| `PARSEL` | kapalı `POLYLINE` (AutoCAD R12, AC1009) |
-| `PARSEL_ETIKET` | köşe numaraları + merkezde `ada/parsel  alan m²` |
-| `IMAR` | 4 satır: `Emsal / TAKS / KAKS`, `Plan: …`, `Kullanim: …`, `Kat / H / Nizam` |
-
-`parsel_imar` IMAR katmanını otomatik ekler; `parsel_dxf` (salt kadastro) eklemez.
-
-## Davranış
-
-- Seri istek, aralarında **≥500 ms**; tek parsel (toplu tarama yok), 3 deneme, disk önbellek.
-- Önbellek: imar **24 saat**, il/ilçe/mahalle listeleri **7 gün**, ada/parsel eşleşmesi 6 saat, TKGM parsel 1 saat.
-- Hata tipleri: `bulunamadi`, `belirsiz`, `kapsam_disi`, `giris_gerekli`, `captcha`, `bakimda`, `modul_yok`, `erisilemedi`, `zaman_asimi`, `ag_hatasi`.
-- Mahalle eşlemesi: TKGM mahalle adı ile KEOS **tapu mahallesi** farklı olabilir (ör. Rize 46 idari / 113 tapu). Sonuçlarda `mahalle_esleme: {tkgm, keos}` döner; ada/parsel birden fazla mahallede varsa aday listesi verilir.
-- TLS: varsayılan **doğrulama açık**. Yalnız `keos.nevsehir.bel.tr` ve `keos.sivas.bel.tr` için hosta özel `CERT_NONE` (sertifika zinciri eksik); genel bir `CERT_NONE` yok.
+- **Resmî API değil**: TKGM `cbsapi` ve KEOS `imarsvc` uçları site arayüzünden çıkarıldı; portal değişirse kırılabilir.
+- **Kaynak sayfa** portalın kendi print CSS'i ile üretilir; sayfa bölünmesi portalın düzenine bağlıdır
+  (harita/tablo 2-3 sayfaya bölünebilir).
+- **TKGM sayfası birebir alınmıyor**: portal "Kullanım Koşulları" modalı ve özel dropdown'lar
+  kullanıyor; v3'te TKGM verisi özet tabloda yer alır (`kaynak_sayfa_tkgm` deneysel bayrak).
+- **Hesap/maliyet yok**: daire sayısı, inşaat alanı, maliyet hesaplanmaz; bu kararlar mimara aittir.
+- **İmar cache 24 saat**; plan tadilatı aynı gün yansımayabilir. `imar_sorgula` kaynak URL ve zaman döner.
+- **7 il kapsam dışı** (giriş/captcha/bakım/404/503/zaman aşımı); `imar_kapsam` nedeniyle listeler.
+- Yasal: çıktı **ruhsata esas proje değildir**; TKGM kullanım koşulları ticari kullanımı sınırlar,
+  veri yalnızca kullanıcının kendi sorgusu için alınır.
 
 ## Testler
 
 ```bash
-python3 test_mcp.py            # --offline: 37 kontrol, ağ yok (fixture + projeksiyon + DXF)
-python3 test_mcp.py --online   # 10 kontrol: gerçek TKGM + 4 ilde gerçek imar
+python3 test_mcp.py            # offline: 24 kontrol (şema, alias, parser, DXF/PNG, PDF, birleştirme, ZIP)
+python3 test_mcp.py --online   # 14 kontrol: 2 gerçek parsel uçtan uca + kaynak sayfa
 ```
 
-Offline fixture'lar portalların **gerçek** yanıtlarından alındı (Rize, Burdur, Aksaray, Amasya HTML'leri).
-
-## Sınırlar
-
-- **Resmî API değil.** Portal/HTML değişirse il bazında kırılabilir; o il `beklenmeyen_yanit`/`bulunamadi` döner, veri uydurulmaz.
-- **7 il kapsam dışı** (yukarıdaki matris): giriş, captcha, bakım, 404, 503, zaman aşımı. Bu illerde hesap açılmaz, captcha çözülmez, e-Devlet girişi yapılmaz.
-- **Veri güncelliği**: sonuç portalın o anki halidir; askı/tadilat süreçleri gecikmeli yansıyabilir. Resmî işlemde belediyeden **imarlı çap** alınmalıdır; kullanım sorumluluğu kullanıcıdadır.
-- **Boş alanlar normaldir**: TAKS/kat/çekme/pafta portalda çoğu parselde `-`; `null` döner.
-- Kişisel veri yok: malik/hisse/takyidat okunmaz; yalnızca parselin imar parametreleri.
-- DWG üretilmez (DXF her CAD programında açılır).
+Offline mod ağa çıkmaz: TKGM/imar/kaynak fonksiyonları fixture ve mock ile değiştirilir.
 
 ## Lisans
 
-MIT © 2026 OpenBot ekibi. Kaynak siteler: TKGM (`cbsapi.tkgm.gov.tr`, `parselsorgu.tkgm.gov.tr`) ve il belediyelerinin KEOS e-İmar portalları.
+MIT © 2026 OpenBot ekibi.

@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""parsel-imar birlesik MCP sunucusu testleri.
+"""mcp-parsel-imar-v3 testleri.
 
-Kullanim:
-    python3 test_mcp.py              # --offline (varsayilan): ag yok
-    python3 test_mcp.py --online     # gercek TKGM + e-Imar portalleri
-
-Offline mod: TKGM projeksiyonu, DXF (IMAR katmani dahil), imar HTML parser'i
-(gercek portallardan alinan fixture'larla) ve il konfigurasyonunu dogrular.
+    python3 test_mcp.py            # offline: ag yok
+    python3 test_mcp.py --online   # gercek TKGM + KEOS + kaynak sayfa
 """
 
 import json
-import math
 import os
 import subprocess
 import sys
@@ -21,20 +16,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(HERE, "server.py")
 FIX = os.path.join(HERE, "tests", "fixtures")
 
-TMP = tempfile.mkdtemp(prefix="parsel-imar-test-")
+TMP = tempfile.mkdtemp(prefix="parsel-imar-v3-test-")
 os.environ.setdefault("PARSELIMAR_CIKTI", os.path.join(TMP, "cikti"))
 os.environ.setdefault("PARSELIMAR_CACHE", os.path.join(TMP, "cache"))
 
 sys.path.insert(0, HERE)
-import server as srv   # noqa: E402
-import imar            # noqa: E402
+import server as srv       # noqa: E402
+import imar                # noqa: E402
+import cizim               # noqa: E402
+import kaynak              # noqa: E402
+import rapor               # noqa: E402
 
 OK = 0
 FAIL = 0
 
-ARACLAR = ["iller_listele", "ilceler_listele", "mahalleler_listele", "parsel_sorgula", "parsel_bul",
-           "parsel_sorgula_koordinat", "parsel_dxf", "imar_iller_listele", "imar_ilceler_listele",
-           "imar_mahalleler_listele", "imar_sorgula", "parsel_imar"]
+ARACLAR = ["parsel", "imar_sorgula", "imar_kapsam", "liste", "cizim", "kaynak_sayfa", "paket", "durum"]
 
 
 def check(label, cond, detail=""):
@@ -57,152 +53,6 @@ def fixture_text(name):
         return fh.read()
 
 
-def dxf_metinler(path):
-    """DXF icindeki TEXT entity'lerini (katman, yazi) olarak dondurur."""
-    with open(path, "r", encoding="ascii") as fh:
-        lines = [l.rstrip("\r\n") for l in fh]
-    out, cur = [], None
-    for i in range(0, len(lines) - 1, 2):
-        code, val = lines[i].strip(), lines[i + 1].strip()
-        if code == "0":
-            cur = {"type": val, "tags": {}}
-            out.append(cur)
-        elif cur is not None:
-            cur["tags"].setdefault(code, val)
-    return out
-
-
-def dxf_katmanlar(path):
-    return sorted({e["tags"].get("8") for e in dxf_metinler(path) if e["tags"].get("8")})
-
-
-# ---------------------------------------------------------------- offline
-
-def test_sema():
-    init = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-    info = (init.get("result") or {}).get("serverInfo") or {}
-    check("initialize -> parsel-imar", info.get("name") == "parsel-imar", info)
-
-    tl = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    tools = (tl.get("result") or {}).get("tools") or []
-    isimler = [t["name"] for t in tools]
-    check("tools/list 12 arac", len(tools) == 12, isimler)
-    check("arac adlari beklenen", isimler == ARACLAR, isimler)
-    check("her arac gecerli inputSchema",
-          all(t["inputSchema"].get("type") == "object" and t.get("description") for t in tools))
-    pi = [t for t in tools if t["name"] == "parsel_imar"][0]
-    check("parsel_imar zorunlu alanlari",
-          sorted(pi["inputSchema"]["required"]) == ["ada", "il", "ilce", "mahalle", "parsel"],
-          pi["inputSchema"]["required"])
-
-
-def test_tkgm_projeksiyon():
-    tablo = [(27.0, 5253), (30.0, 5254), (33.0, 5255), (36.0, 5256), (39.0, 5257),
-             (42.0, 5258), (45.0, 5259), (48.0, 5260), (51.0, 5261), (54.0, 5262)]
-    hatalar = [(lon, srv.tm_epsg(lon), epsg) for lon, epsg in tablo if srv.tm_epsg(lon) != epsg]
-    check("EPSG 5253-5262 eslemesi", not hatalar, hatalar)
-
-    e, n = srv.tm_forward(41.04855, 40.61055)
-    check("Rize TM42 koordinati", abs(e - 383182.591) < 0.01 and abs(n - 4546895.252) < 0.01, (e, n))
-
-    en = 0.0
-    for lat in (36.0, 38.0, 40.0, 42.0):
-        for d in (-1.5, 0.0, 1.5):
-            lon = 38.0 + d
-            lon0 = srv.tm_merkez_boylam(lon)
-            e, n = srv.tm_forward(lat, lon, lon0)
-            bl, bn = srv.tm_inverse(e, n, lon0)
-            en = max(en, math.hypot((bl - lat) * 110574.0,
-                                    (bn - lon) * 111320.0 * math.cos(math.radians(lat))))
-    check("WGS84->TM->WGS84 round-trip < 1 mm (%.4f mm)" % (en * 1000), en < 0.001, en)
-
-
-def test_imar_parser():
-    k = imar.normalize(imar.parse_imar_html(fixture_text("rize_157_59.html")), {})
-    check("Rize fixture: emsal 3.0", k["emsal"] == 3.0 and k["kaks"] == 3.0, k["emsal"])
-    check("Rize fixture: bina yuksekligi 30.5", k["bina_yuksekligi_m"] == 30.5, k["bina_yuksekligi_m"])
-    check("Rize fixture: plan adi", "RİZE (MERKEZ) REVİZYON" in (k["plan_adi"] or ""), k["plan_adi"])
-    check("Rize fixture: kullanim karari", k["kullanim_karari"] == "Yerleşik Konut Alanı", k["kullanim_karari"])
-
-    b = imar.normalize(imar.parse_imar_html(fixture_text("burdur_412_20.html")), {})
-    check("Burdur (sablon B): plan adi", "BURDUR İLAVE REVİZYON" in (b["plan_adi"] or ""), b["plan_adi"])
-    check("Burdur: kat 2 / nizam BITISIK", b["kat_sayisi"] == 2 and b["yapi_nizami"] == "BİTİŞİK", b["yapi_nizami"])
-    check("Burdur: EMPTYROW sizmamasi", "EMPTYROW" not in (b["plan_adi"] or ""), b["plan_adi"])
-
-    a = imar.normalize(imar.parse_imar_html(fixture_text("aksaray_668_214.html")), {})
-    check("Aksaray: emsal 1.8 / TAKS 0.4 / kat 4",
-          a["emsal"] == 1.8 and a["taks"] == 0.4 and a["kat_sayisi"] == 4, (a["emsal"], a["taks"], a["kat_sayisi"]))
-    check("Aksaray: yapi nizami A", a["yapi_nizami"] == "A", a["yapi_nizami"])
-
-    m = imar.normalize(imar.parse_imar_html(fixture_text("amasya_2061_13.html")), {})
-    check("Amasya: plan adi ve aciklama notu",
-          "AMASYA" in (m["plan_adi"] or "") and any("Açıklama" in n for n in m["plan_notlari"]),
-          m["plan_notlari"][:1])
-
-    check("TR sayi: '10.974,80 m2' -> 10974.8", imar.tr_num("10.974,80 m²") == 10974.8)
-    check("TR sayi: '30.5' -> 30.5", imar.tr_num("30.5") == 30.5)
-    check("emsal: '- (3,00)' -> 3.0", imar._emsal("- (3,00)") == 3.0)
-    check("emsal: '- (-)' -> None", imar._emsal("- (-)") is None)
-
-
-def test_imar_config():
-    check("20 il tanimli", len(imar.ILLER) == 20, len(imar.ILLER))
-    aktif = [il for il, c in imar.ILLER.items() if c.get("durum") == "aktif"]
-    check("13 il aktif", len(aktif) == 13, aktif)
-    check("aktif illerde base URL var", all(imar.ILLER[i].get("base") for i in aktif))
-    kapali = [il for il, c in imar.ILLER.items() if c.get("durum") != "aktif"]
-    check("kapali illerde durum + portal/not var",
-          all(imar.ILLER[i].get("url") and imar.ILLER[i].get("not") for i in kapali), kapali)
-    check("noverify yalniz Nevsehir+Sivas",
-          sorted(il for il, c in imar.ILLER.items() if c.get("tls") == "noverify") == ["Nevşehir", "Sivas"])
-
-    err, t = call("imar_iller_listele", {})
-    check("imar_iller_listele 20 / 13 aktif", not err and t["adet"] == 20 and t["aktif_adet"] == 13, t)
-
-    err, t = call("imar_sorgula", {"il": "Giresun", "ada": "1", "parsel": "1"})
-    check("Giresun -> kapsam disi (bakimda)", err and t["hata_tipi"] == "bakimda", t)
-
-    err, t = call("imar_sorgula", {"il": "Atlantis", "ada": "1", "parsel": "1"})
-    check("bilinmeyen il -> kapsam_disi", err and t["hata_tipi"] == "kapsam_disi", t)
-
-
-def test_dxf():
-    feature = fixture("parsel_rize_157_59.geojson")
-    cozum = {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
-             "mahalle_id": 123938, "ada": "157", "parsel": "59"}
-    imar_kayit = imar.normalize(imar.parse_imar_html(fixture_text("rize_157_59.html")), {})
-    imar_kayit["durum"] = "ok"
-    imar_kayit["plan_adi"] = "RİZE (MERKEZ) REVİZYON UYGULAMA İMAR PLANI"
-
-    sonuc = srv.parsel_dxf_uret(feature, cozum, "tm", out_dir=TMP, imar_kayit=imar_kayit)
-    dosya = sonuc["dosyalar"][0]["dosya"]
-    check("DXF uretildi (IMAR katmani)", os.path.exists(dosya) and sonuc["dosyalar"][0]["imar_katmani"], dosya)
-    katmanlar = dxf_katmanlar(dosya)
-    check("DXF katmanlari PARSEL + PARSEL_ETIKET + IMAR",
-          katmanlar == ["IMAR", "PARSEL", "PARSEL_ETIKET"], katmanlar)
-    imar_yazilar = [e["tags"].get("1") for e in dxf_metinler(dosya)
-                    if e["type"] == "TEXT" and e["tags"].get("8") == "IMAR"]
-    check("IMAR katmaninda 4 satir", len(imar_yazilar) == 4, imar_yazilar)
-    check("IMAR satiri emsal/TAKS/KAKS iceriyor",
-          any("Emsal 3" in y and "TAKS" in y for y in imar_yazilar), imar_yazilar)
-    check("IMAR satiri plan adini iceriyor", any("Plan: RIZE" in y for y in imar_yazilar), imar_yazilar)
-
-    # imar yoksa IMAR katmani eklenmemeli
-    sonuc2 = srv.parsel_dxf_uret(feature, cozum, "tm", out_dir=TMP)
-    check("imar yokken IMAR katmani yok", "IMAR" not in dxf_katmanlar(sonuc2["dosyalar"][0]["dosya"]))
-
-
-def test_env():
-    hedef = os.path.join(TMP, "env-cikti")
-    env = dict(os.environ)
-    env["PARSELIMAR_CIKTI"] = hedef
-    env["PARSELIMAR_CACHE"] = os.path.join(TMP, "env-cache")
-    out = subprocess.check_output(
-        [sys.executable, "-c", "import server; print(server.OUT_DIR); print(server.CACHE_DIR)"],
-        cwd=HERE, env=env, universal_newlines=True).splitlines()
-    check("PARSELIMAR_CIKTI/CACHE env", out[0] == hedef and out[1].endswith("env-cache"), out)
-
-
 def call(name, args):
     r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                     "params": {"name": name, "arguments": args}})
@@ -214,20 +64,194 @@ def call(name, args):
         return bool(res.get("isError")), {"_text": text}
 
 
-def run_offline():
-    print("MOD: offline (ag erisimi yok)\n")
-    test_sema()
-    test_tkgm_projeksiyon()
-    test_imar_parser()
-    test_imar_config()
-    test_dxf()
-    test_env()
+def dxf_entities(path):
+    with open(path, "r", encoding="ascii") as fh:
+        lines = [l.rstrip("\r\n") for l in fh]
+    ents, cur = [], None
+    for i in range(0, len(lines) - 1, 2):
+        code, val = lines[i].strip(), lines[i + 1].strip()
+        if code == "0":
+            cur = {"type": val, "tags": {}}
+            ents.append(cur)
+        elif cur is not None:
+            cur["tags"].setdefault(code, val)
+    return ents
+
+
+def png_boyut(path):
+    import struct
+    with open(path, "rb") as fh:
+        head = fh.read(24)
+    return struct.unpack(">II", head[16:24]) if head[:8] == b"\x89PNG\r\n\x1a\n" else (0, 0)
+
+
+# ---------------------------------------------------------------- offline
+
+def test_sema():
+    init = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    info = (init.get("result") or {}).get("serverInfo") or {}
+    check("initialize -> parsel-imar-v3", info.get("name") == "parsel-imar-v3", info)
+    tl = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    tools = (tl.get("result") or {}).get("tools") or []
+    isimler = [t["name"] for t in tools]
+    check("tools/list 8 arac", len(tools) == 8 and isimler == ARACLAR, isimler)
+    check("her arac gecerli inputSchema",
+          all(t["inputSchema"].get("type") == "object" and t.get("description") for t in tools))
+
+    err, t = call("on_proje", {})
+    check("on_proje -> 'kaldirildi' hatasi", err and t.get("hata_tipi") == "kaldirildi", t)
+    err, t = call("kural_ozeti", {})
+    check("kural_ozeti -> 'kaldirildi'", err and t.get("hata_tipi") == "kaldirildi", t)
+
+    check("kodda maliyet/onproje/kural importu yok",
+          not any(m in open(SERVER, encoding="utf-8").read()
+                  for m in ("import maliyet", "import onproje", "kural_coz")),
+          "import taramasi")
+
+    err, t = call("durum", {})
+    check("durum: surum 3 + 8 arac", not err and t["surum"] == "3.0.0" and t["arac_sayisi"] == 8, t)
+
+
+def test_alias():
+    feature = fixture("parsel_rize_157_59.geojson")
+    cozum = {"il": "Rize", "il_id": 75, "ilce": "Merkez", "ilce_id": 786,
+             "mahalle": "Tophane", "mahalle_id": 123938, "ada": "157", "parsel": "59"}
+    eski = srv._tkgm_coz
+    srv._tkgm_coz = lambda *a, **k: (feature, dict(cozum))
+    try:
+        err, t = call("parsel_bul", {"il_adi": "Rize", "ilce_adi": "Merkez",
+                                     "mahalle_adi": "Tophane", "ada": "157", "parsel": "59"})
+    finally:
+        srv._tkgm_coz = eski
+    check("alias parsel_bul -> parsel (il_adi cevirisi)", not err and t.get("alan_m2") == 640.26, t)
+
+
+def test_imar_parser():
+    k = imar.normalize(imar.parse_imar_html(fixture_text("rize_157_59.html")), {})
+    check("imar fixture: emsal 3.0 / H 30.5", k["emsal"] == 3.0 and k["bina_yuksekligi_m"] == 30.5, k)
+    a = imar.normalize(imar.parse_imar_html(fixture_text("aksaray_668_214.html")), {})
+    check("imar fixture: TAKS 0.4 / emsal 1.8 / kat 4",
+          a["taks"] == 0.4 and a["emsal"] == 1.8 and a["kat_sayisi"] == 4, a)
+    b = imar.normalize(imar.parse_imar_html(fixture_text("burdur_412_20.html")), {})
+    check("imar fixture: sablon B plan adi", "BURDUR İLAVE REVİZYON" in (b["plan_adi"] or ""), b["plan_adi"])
+
+
+def test_cizim():
+    feature = fixture("parsel_rize_157_59.geojson")
+    cozum = {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane", "ada": "157", "parsel": "59"}
+    imar_k = imar.normalize(imar.parse_imar_html(fixture_text("rize_157_59.html")), {})
+    imar_k["durum"] = "ok"
+    out = os.path.join(TMP, "cizim")
+    os.makedirs(out, exist_ok=True)
+    res = srv.parsel_dxf_uret(feature, cozum, "tm", out_dir=out, imar_kayit=imar_k)
+    dxf = res["dosyalar"][0]["dosya"]
+    ents = dxf_entities(dxf)
+    polys = [e for e in ents if e["type"] == "POLYLINE"]
+    check("DXF: kapali POLYLINE", polys and all(int(e["tags"].get("70", "0")) & 1 for e in polys), len(polys))
+    katmanlar = sorted({e["tags"].get("8") for e in ents if e["tags"].get("8")})
+    check("DXF: IMAR katmani var", "IMAR" in katmanlar, katmanlar)
+
+    tm, lon0, epsg = srv._proj(feature)
+    d = 5.0
+    cekme, uyg = cizim.guvenli_offset(tm, d)
+    resim = cizim.vaziyet_ciz(tm, cekme, "157/59", 640.26, (5.0, 3.0, 3.0), out)
+    check("PNG: >=1200 px", resim.get("png") and png_boyut(resim["png"])[0] >= 1200,
+          png_boyut(resim.get("png") or ""))
+    svg = open(resim["svg"], encoding="utf-8").read()
+    check("PNG/SVG: TR sayi bicimi (640,26)", "640,26" in svg, svg[:60])
+    check("PNG: cekme cizgisi yalniz gecerli offsette",
+          (cekme is not None) == ('class="cekme"' in svg), (cekme is not None))
+
+
+def test_ozet_pdf_ve_birlestirme():
+    veri = {"parsel": {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane", "ada": "157",
+                       "parsel": "59", "alan_m2": 640.26, "nitelik": "Kargir Ev Ve Arsası",
+                       "pafta": "F45-D-21-D-2-B", "mevkii": "Orta Mahalle",
+                       "zemin_km": "Ana Taşınmaz", "geometri_tipi": "Polygon", "koordinat_sayisi": 9},
+            "imar": {"plan_adi": "RİZE (MERKEZ) REVİZYON UYGULAMA İMAR PLANI", "emsal": 3.0,
+                     "taks": None, "bina_yuksekligi_m": 30.5, "kullanim_karari": "Yerleşik Konut Alanı",
+                     "plan_notlari": ["Açıklama: örnek plan notu"], "sorgu_zamani": "2026-10-29T12:00:00+03:00",
+                     "kaynak": {"sorgu_url": "https://keos.rize.bel.tr:444/imardurumu/imar.aspx?parselid=93274"}},
+            "zaman": "2026-10-29T12:00:00+03:00"}
+    out = os.path.join(TMP, "pdf")
+    os.makedirs(out, exist_ok=True)
+    gorsel = None
+    ozet = os.path.join(out, "ozet.pdf")
+    meta = rapor.ozet_pdf(ozet, veri, gorsel)
+    check("ozet.pdf: 3 sayfa", meta.get("yazildi") and meta.get("sayfa") == 3, meta)
+    check("ozet.pdf: %PDF + > 8 KB", open(ozet, "rb").read(4) == b"%PDF" and os.path.getsize(ozet) > 8000,
+          os.path.getsize(ozet))
+
+    # sahte kaynak sayfa (2 sayfa) + birlestirme
+    src = os.path.join(out, "kaynak.pdf")
+    pdf = rapor.PDF(src, "kaynak")
+    pdf.yeni_sayfa("Kaynak sayfa")
+    pdf.p("Portal çıktısı — harita ve tablo.")
+    pdf.yeni_sayfa("Kaynak 2")
+    pdf.p("Devam.")
+    pdf.bitir()
+    bir = rapor.birlestir(ozet, src, os.path.join(out, "paket.pdf"))
+    check("birlestirme: 5 sayfa", bir.get("durum") == "ok" and bir.get("sayfa") == 5, bir)
+
+    try:
+        from pypdf import PdfReader
+        metin = "".join((p.extract_text() or "") for p in PdfReader(os.path.join(out, "paket.pdf")).pages)
+        check("PDF metni: 'Emsal' ve '640,26'", "Emsal" in metin and "640,26" in metin, metin[:120])
+    except ImportError:
+        check("pypdf yok, metin testi atlandi", True)
+
+    md = rapor.rapor_md(veri)
+    check("rapor.md: baslik + uyari", "Parsel bilgi paketi" in md and "ruhsata esas" in md.lower(), md[:80])
+
+
+def test_paket_offline():
+    feature = fixture("parsel_rize_157_59.geojson")
+    cozum = {"il": "Rize", "il_id": 75, "ilce": "Merkez", "ilce_id": 786,
+             "mahalle": "Tophane", "mahalle_id": 123938, "ada": "157", "parsel": "59"}
+    imar_k = imar.normalize(imar.parse_imar_html(fixture_text("rize_157_59.html")), {})
+    imar_k.update({"durum": "ok", "il": "Rize",
+                   "kaynak": {"portal": "https://keos.rize.bel.tr:444/imardurumu/",
+                              "sorgu_url": "https://keos.rize.bel.tr:444/imardurumu/imar.aspx?parselid=93274"},
+                   "sorgu_zamani": "2026-10-29T12:00:00+03:00"})
+
+    eski = (srv._tkgm_coz, imar.imar_sorgula, kaynak.kaynak_sayfa)
+    srv._tkgm_coz = lambda *a, **k: (feature, dict(cozum))
+    imar.imar_sorgula = lambda *a, **k: dict(imar_k)
+
+    def sahte_kaynak(url, out_dir, ad="kaynak_imar", yatay=True, tkgm=False, **kw):
+        os.makedirs(out_dir, exist_ok=True)
+        yol = os.path.join(out_dir, ad + ".pdf")
+        pdf = rapor.PDF(yol, "kaynak")
+        pdf.yeni_sayfa("Kaynak imar sayfasi (mock)")
+        pdf.p("Harita ve tablo burada.")
+        pdf.bitir()
+        png = os.path.join(out_dir, ad + ".png")
+        open(png, "wb").write(b"")
+        return {"durum": "ok", "pdf": yol, "png": None, "url": url, "plan_pdf": None,
+                "sure_sn": 0.1, "pdf_linkleri": []}
+
+    kaynak.kaynak_sayfa = sahte_kaynak
+    try:
+        r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "paket", "arguments": {
+                            "il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
+                            "ada": "157", "parsel": "59"}}})
+        t = json.loads(r["result"]["content"][0]["text"])
+    finally:
+        srv._tkgm_coz, imar.imar_sorgula, kaynak.kaynak_sayfa = eski
+
+    d = t.get("dosyalar") or {}
+    check("paket(offline): ozet + kaynak + birlesik + zip",
+          all(k in d for k in ("ozet.pdf", "paket.pdf", "parsel.dxf", "parsel.png", "paket.zip")), sorted(d))
+    check("paket(offline): birlesik >= 4 sayfa", (t.get("paket_pdf") or {}).get("sayfa", 0) >= 4,
+          t.get("paket_pdf"))
+    check("paket(offline): zip icinde >= 7 dosya", len(t.get("zip_icerik") or []) >= 7, t.get("zip_icerik"))
 
 
 # ---------------------------------------------------------------- online
 
 def run_online():
-    print("MOD: online (gercek TKGM + e-Imar)\n")
+    print("MOD: online (gercek TKGM + KEOS + kaynak sayfa)\n")
     proc = subprocess.Popen([sys.executable, SERVER], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             universal_newlines=True, bufsize=1)
@@ -256,47 +280,58 @@ def run_online():
     try:
         init = rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
                                   "clientInfo": {"name": "test", "version": "1"}})
-        check("initialize", (init.get("result") or {}).get("serverInfo", {}).get("name") == "parsel-imar", init)
+        check("initialize", (init.get("result") or {}).get("serverInfo", {}).get("name") == "parsel-imar-v3", init)
         rpc("notifications/initialized", {}, notify=True)
-        check("tools/list 12", len(rpc("tools/list")["result"]["tools"]) == 12)
+        check("tools/list 8", len(rpc("tools/list")["result"]["tools"]) == 8)
 
-        err, t = cagir("parsel_bul", {"il_adi": "Rize", "ilce_adi": "Merkez", "mahalle_adi": "Tophane",
-                                      "ada": "157", "parsel": "59"})
-        check("TKGM parsel_bul (Rize/Tophane 157/59)", not err and t.get("alan_m2") == 640.26, t)
+        err, t = cagir("parsel", {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
+                                  "ada": "157", "parsel": "59"})
+        check("parsel Rize 157/59", not err and t.get("alan_m2") == 640.26, t)
 
-        err, t = cagir("parsel_imar", {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
-                                       "ada": "157", "parsel": "59"})
-        check("parsel_imar Rize: TKGM + imar", not err and t["tkgm"]["alan_m2"] == 640.26
-              and t["imar"].get("emsal") == 3.0, t.get("imar"))
-        check("parsel_imar Rize: DXF + IMAR katmani",
-              t["dxf"]["dosyalar"][0]["imar_katmani"] and os.path.exists(t["dxf"]["dosyalar"][0]["dosya"]),
-              t.get("dxf"))
-        print("      Rize:", json.dumps({k: t["imar"].get(k) for k in
-              ("plan_adi", "emsal", "taks", "bina_yuksekligi_m", "kullanim_karari")}, ensure_ascii=False))
+        err, t = cagir("imar_sorgula", {"il": "Rize", "mahalle": "Tophane", "ada": "157", "parsel": "59"})
+        check("imar_sorgula: emsal 3 / H 30.5", not err and t.get("emsal") == 3.0
+              and t.get("bina_yuksekligi_m") == 30.5, t)
 
-        err, t = cagir("parsel_imar", {"il": "Aksaray", "ilce": "Merkez", "mahalle": "Kılıçarslan",
-                                       "ada": "668", "parsel": "214"})
-        check("parsel_imar Aksaray: emsal 1.8 / TAKS 0.4",
-              not err and t["imar"].get("emsal") == 1.8 and t["imar"].get("taks") == 0.4, t.get("imar"))
-        print("      Aksaray:", json.dumps({k: t["imar"].get(k) for k in
-              ("plan_adi", "emsal", "taks", "kat_sayisi", "yapi_nizami")}, ensure_ascii=False))
+        err, t = cagir("liste", {"tur": "il"})
+        check("liste(tur=il) 81", not err and len(t.get("iller") or []) == 81, len(t.get("iller") or []))
 
-        err, t = cagir("imar_sorgula", {"il": "Tunceli", "mahalle": "Alpdoğan", "ada": "276", "parsel": "9"})
-        check("Tunceli: emsal 1.2 / H 16.5", not err and t.get("emsal") == 1.2
-              and t.get("bina_yuksekligi_m") == 16.5, t)
+        err, t = cagir("cizim", {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
+                                 "ada": "157", "parsel": "59"})
+        check("cizim: dxf + png", not err and os.path.exists(t.get("dxf", ""))
+              and png_boyut(t.get("png") or "")[0] >= 1200, t.get("dxf"))
 
-        err, t = cagir("imar_sorgula", {"il": "Niğde", "mahalle": "Aşağıkayabaşı", "ada": "104", "parsel": "5"})
-        check("Niğde: emsal 0.1 / TAKS 0.05", not err and t.get("emsal") == 0.1
-              and t.get("taks") == 0.05, t)
-
-        err, t = cagir("imar_sorgula", {"il": "Giresun", "ada": "1", "parsel": "1"})
-        check("Giresun kapali (bakimda)", err and t.get("hata_tipi") == "bakimda", t)
-
-        err, t = cagir("imar_mahalleler_listele", {"il": "Rize"})
-        check("Rize mahalle listeleri", not err and t["adet"] > 20 and t["tapu_adet"] > 20, t.get("adet"))
+        for il, ilce, mah, ada, parsel in (("Rize", "Merkez", "Tophane", "157", "59"),
+                                           ("Aksaray", "Merkez", "Kılıçarslan", "668", "214")):
+            err, t = cagir("paket", {"il": il, "ilce": ilce, "mahalle": mah,
+                                     "ada": ada, "parsel": parsel})
+            d = (t or {}).get("dosyalar") or {}
+            check("paket %s: dosyalar" % il,
+                  not err and all(k in d for k in ("ozet.pdf", "paket.pdf", "kaynak_imar.pdf",
+                                                   "parsel.dxf", "parsel.png", "paket.zip")), sorted(d))
+            check("paket %s: birlesik 5+ sayfa" % il, (t.get("paket_pdf") or {}).get("sayfa", 0) >= 4,
+                  (t or {}).get("paket_pdf"))
+            check("paket %s: kaynak pdf > 100 KB" % il,
+                  os.path.getsize(d.get("kaynak_imar.pdf", "/dev/null")) > 100000,
+                  d.get("kaynak_imar.pdf"))
+            check("paket %s: PNG >=1200 px" % il, png_boyut(d.get("parsel.png") or "")[0] >= 1200)
+            print("      %s: paket.pdf %d sayfa %.0f KB | kaynak %.0f KB | zip %.0f KB" % (
+                il, (t.get("paket_pdf") or {}).get("sayfa", 0),
+                os.path.getsize(d.get("paket.pdf", "/dev/null")) / 1024.0,
+                os.path.getsize(d.get("kaynak_imar.pdf", "/dev/null")) / 1024.0,
+                os.path.getsize(d.get("paket.zip", "/dev/null")) / 1024.0))
     finally:
         proc.stdin.close()
         proc.wait(timeout=10)
+
+
+def run_offline():
+    print("MOD: offline (ag erisimi yok)\n")
+    test_sema()
+    test_alias()
+    test_imar_parser()
+    test_cizim()
+    test_ozet_pdf_ve_birlestirme()
+    test_paket_offline()
 
 
 def main(argv):

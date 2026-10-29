@@ -17,5 +17,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Offline testler (ag yok)
+      - name: Offline testler (ag ve tarayici yok)
         run: python test_mcp.py --offline

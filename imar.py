@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Netcad KEOS e-Imar adaptoru (Rize + 19 il).
+"""Netcad KEOS e-Imar adaptoru (Rize + 19 il) — v3."
 
 20 ilin 13'unde ayni servis deseni calisiyor; 7 il olculen bir engel yuzunden
 kapsam disi (giris, captcha, bakim, 404, 503, zaman asimi). Engel turleri
@@ -601,21 +601,6 @@ def _sec(adaylar, mahalle):
     return adaylar[0]
 
 
-def _ozel_notlar(il, parsel_id, cfg):
-    base = _base(cfg)
-    try:
-        data = _fetch(base + "service/imarsvc.aspx?type=ozelnot&parselid=%s" % parsel_id, cfg, "json", CAND_TTL)
-    except ApiError:
-        return []
-    out = []
-    for item in data if isinstance(data, list) else []:
-        if not isinstance(item, dict):
-            continue
-        for key in ("SINIR_PLANNOTU", "PLANNOTU", "NOT"):
-            v = item.get(key)
-            if v and str(v).strip() not in ("", "#"):
-                out.append(str(v).strip())
-    return out
 
 
 def imar_durumu(il, parsel_id, tkgm_mahalle=None):
@@ -669,11 +654,3 @@ def imar_sorgula(il, ilce=None, mahalle=None, ada=None, parsel=None):
     kayit["sorgu_zamani"] = now_tr()
     return kayit
 
-
-def imar_link(il, ilce=None):
-    ad, cfg = il_bilgi(il)
-    if cfg.get("durum") == "aktif":
-        return {"il": ad, "durum": "aktif", "portal": cfg["base"], "otomatik_sorgu": True,
-                "tls": cfg.get("tls"), "not": "Ada/parsel ile imar_sorgula kullanilabilir."}
-    return {"il": ad, "durum": cfg.get("durum"), "portal": cfg.get("url"),
-            "otomatik_sorgu": False, "not": cfg.get("not")}
