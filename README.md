@@ -7,6 +7,8 @@ Hesap, maliyet, kural motoru **yoktur**; ürün "karar öncesi bilgi dosyası" �
 
 ![Özet PDF — sayfa 2 (imar + kaynak önizleme)](docs/ornek_ozet_s2.png)
 
+![Küçük parsel çizimi (Çarşı 15/4)](docs/ornek_kucuk_parsel.png)
+
 ![Kaynak sayfa 1 — harita (portalın kendi çıktısı)](docs/ornek_harita_s4.png)
 
 ![Kaynak sayfa 2 — tablo](docs/ornek_tablo_s5.png)
@@ -53,7 +55,7 @@ Yerine gelen: **kaynak sayfa** (portalın `imar.aspx` çıktısı, harita + tabl
 | `kaynak_imar.png` | Aynı sayfanın tam sayfa görüntüsü (1280 px genişlik) |
 | `paket.pdf` | **Özet (3 dikey) + kaynak (2 yatay) = 5 sayfa**, tek PDF (boş/taşan sayfa yok) |
 | `parsel.dxf` | R12, kapalı POLYLINE, `PARSEL` + `IMAR` etiket katmanı |
-| `parsel.png` | 1/500 vaziyet: parsel, çekme sınırı (yalnız geçerli offset), ölçüler (kenardan 2,5-5 m dışa, beyaz zeminli), kuzey oku (K ayrık), ölçek |
+| `parsel.png` | 1/500 vaziyet: parsel, çekme sınırı (yalnız geçerli offset), ölçüler (kenardan dışa, beyaz zeminli; kısa kenarda kenar orta noktasından etikete kesintisiz lider çizgisi), alt %12'lik sabit başlık bandı, kuzey oku, ölçek |
 | `rapor.json` / `rapor.md` | Tek şema: `{sorgu, parsel, imar, kaynak_sayfa, cizim, uyarilar, zaman}` |
 | `paket.zip` | Yukarıdakilerin tamamı (deflate) |
 
@@ -112,6 +114,8 @@ aranabilirliği özet sayfalarda korunur.
 ## Sınırlar
 
 - **Resmî API değil**: TKGM `cbsapi` ve KEOS `imarsvc` uçları site arayüzünden çıkarıldı; portal değişirse kırılabilir.
+- **Çizim yerleşimi**: başlık bloğu tuvalin alt ~%12'sinde ayrı bantta; çizim + tüm ölçü
+  etiketleri bandın üstünde kalır (küçük parsellerde de çakışma yok).
 - **Kaynak sayfalar** portalın ekran görüntüsüdür (print CSS haritayı boşalttığı için kullanılmaz).
   Harita ve tablo ayrı yatay A4 sayfalara kırpılır (görüntü alanı %84 / %87, kenar 8 mm);
   harita ipucu (tooltip) çekimden önce gizlenir.
@@ -126,8 +130,8 @@ aranabilirliği özet sayfalarda korunur.
 ## Testler
 
 ```bash
-python3 test_mcp.py            # offline: 28 kontrol (şema, alias, parser, DXF/PNG, PDF, birleştirme, ZIP, sayfa metrikleri)
-python3 test_mcp.py --online   # 25 kontrol: 2 gerçek parsel + kaynak sayfa + sayfa/görsel metrikleri
+python3 test_mcp.py            # offline: 31 kontrol (şema, alias, parser, DXF/PNG, PDF, birleştirme, ZIP, sayfa metrikleri)
+python3 test_mcp.py --online   # 32 kontrol: 2 gerçek parsel + kaynak sayfa + sayfa/görsel metrikleri
 ```
 
 Offline mod ağa çıkmaz: TKGM/imar/kaynak fonksiyonları fixture ve mock ile değiştirilir.

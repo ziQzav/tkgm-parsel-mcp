@@ -145,7 +145,7 @@ def olcek_cubugu(x, y, uzunluk, etiket, h):
     ]
 
 
-def svg_yaz(path, entities, baslik):
+def svg_yaz(path, entities, baslik, sinir=None):
     xs, ys = [], []
     for e in entities:
         if e.get("tip") == "polyline":
@@ -161,9 +161,12 @@ def svg_yaz(path, entities, baslik):
             ys.append(e["y"])
     if not xs:
         xs, ys = [0.0, 1.0], [0.0, 1.0]
-    x0, x1 = min(xs), max(xs)
-    y0, y1 = min(ys), max(ys)
-    pad = max(x1 - x0, y1 - y0) * 0.08 + 0.5
+    if sinir:
+        x0, y0, x1, y1 = sinir
+    else:
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+    pad = 0.0 if sinir else (max(x1 - x0, y1 - y0) * 0.08 + 0.5)
     vx, vy = x0 - pad, -(y1 + pad)
     vw, vh = (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad
 
@@ -243,8 +246,23 @@ def png_uret(svg_path, png_path):
     return None
 
 
+def _metin_kutu(x, y, yazi, h, aci):
+    """Metin icin yaklasik eksen-hizali kutu (dunya koordinati)."""
+    w = 0.58 * h * len(str(yazi)) + 0.6 * h
+    hh = 1.55 * h
+    a = math.radians(aci)
+    ca, sa = abs(math.cos(a)), abs(math.sin(a))
+    ew, eh = w * ca + hh * sa, w * sa + hh * ca
+    return (x - ew / 2, y - eh / 2, x + ew / 2, y + eh / 2)
+
+
+def _kutu_birlestir(kutular):
+    return (min(k[0] for k in kutular), min(k[1] for k in kutular),
+            max(k[2] for k in kutular), max(k[3] for k in kutular))
+
+
 def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, baslik="VAZIYET 1/500"):
-    """Parsel + cekme siniri + olculer + kuzey + olcek. Donus: {svg,png,png_arac}."""
+    """Parsel + cekme + olcular; alt %12'lik sabit baslik bandi, icerik 'contain'."""
     xs = [p[0] for p in parse]
     ys = [p[1] for p in parse]
     g = max(max(xs) - min(xs), max(ys) - min(ys))
@@ -253,8 +271,10 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
     if cekme_poly:
         ent.append({"tip": "polyline", "katman": "CEKME", "noktalar": cekme_poly})
 
-    # disa dogru ofset (olcu yazisi cizgiye binmesin)
-    ofs = max(2.5, g * 0.05)
+    kutular = [(min(xs), min(ys), max(xs), max(ys))]
+    yazilan = []
+    liderler = []
+    h_e = h_txt * 0.8            # etiket yazi boyu
     for i in range(len(parse)):
         a, b = parse[i], parse[(i + 1) % len(parse)]
         mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
@@ -262,20 +282,56 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
         L = math.hypot(dx, dy)
         if L < 1e-6:
             continue
-        # CCW poligonda dis normal = (dy, -dx)
         nx, ny = dy / L, -dx / L
-        if icinde((mx + nx * (ofs + 0.6), my + ny * (ofs + 0.6)), parse):
+        if icinde((mx + nx * (max(2.5, g * 0.05) + 0.6), my + ny * (max(2.5, g * 0.05) + 0.6)), parse):
             nx, ny = -nx, -ny
+        kisa = L < 3.0
+        ofs = min(8.0, 4.0) if kisa else max(2.5, g * 0.05)
+        if kisa:
+            ofs = min(8.0, max(3.0, 0.9 * L + 1.2))
         px, py = mx + nx * ofs, my + ny * ofs
+        # cok yakin iki etiket (or. ayni girintinin iki 0,84 m kenari) ust uste yazilmasin
+        if any(math.hypot(px - q[0], py - q[1]) < 1.4 * h_txt for q in yazilan):
+            continue
+        yazilan.append((px, py))
         aci = math.degrees(math.atan2(dy, dx))
         if aci > 90:
             aci -= 180
         elif aci < -90:
             aci += 180
-        ent.append({"tip": "text", "katman": "OLCU", "x": px, "y": py,
-                    "yazi": "%s m" % _tr(L), "h": h_txt * 0.8, "aci": aci, "arka": True})
+        if kisa:
+            aci = 0.0                       # kisa kenar: yatay yaz
+        # lider: kenar orta noktasindan (poligon uzerinde) etiket kutusunun kenarina kadar
+        lider_gerekli = kisa or ofs > 0.6 * L
+        if lider_gerekli:
+            bosluk = 0.55 * h_e + 0.15 * h_txt
+            ex, ey = px - nx * bosluk, py - ny * bosluk
+            ent.append({"tip": "line", "katman": "CIZGI", "a": (mx, my), "b": (ex, ey)})
+            liderler.append({"kenar_m": round(L, 2), "baslangic": [round(mx, 2), round(my, 2)],
+                             "bitis": [round(ex, 2), round(ey, 2)],
+                             "baslangic_kenar_mesafe_m": 0.0})
+        yazi = "%s m" % _tr(L)
+        ent.append({"tip": "text", "katman": "OLCU", "x": px, "y": py, "yazi": yazi,
+                    "h": h_e, "aci": aci, "arka": True})
+        kutular.append(_metin_kutu(px, py, yazi, h_e, aci))
 
-    y = min(ys) - h_txt * 2.5
+    kb = _kutu_birlestir(kutular)
+    # kuzey oku ve olcek cubugu icerik kutusunun disinda, banda degmeyecek sekilde
+    kuzey = kuzey_oku(kb[2] + h_txt * 1.6, kb[3] - h_txt, h_txt * 0.8)
+    olcek = olcek_cubugu(kb[0], kb[1] - h_txt * 2.6, 20.0, "20 m", h_txt * 0.7)
+    ent += kuzey + olcek
+    for e in kuzey + olcek:
+        if e.get("tip") == "text":
+            kutular.append(_metin_kutu(e["x"], e["y"], e["yazi"], e["h"], 0))
+        elif e.get("tip") == "line":
+            kutular.append((min(e["a"][0], e["b"][0]), min(e["a"][1], e["b"][1]),
+                            max(e["a"][0], e["b"][0]), max(e["a"][1], e["b"][1])))
+    kb = _kutu_birlestir(kutular)
+    ic_w, ic_h = kb[2] - kb[0], kb[3] - kb[1]
+    pad = 0.03 * max(ic_w, ic_h)
+
+    # baslik bandi: tuval yuksekliginin %12'si (en az 3 satir)
+    gap = max(2.2 * h_txt, 0.05 * ic_h)
     satirlar = ["ADA/PARSEL: %s" % kimlik,
                 "ALAN: %s m2 | OLCEK 1/500" % _tr(alan_m2)]
     if cekme_poly:
@@ -284,15 +340,28 @@ def vaziyet_ciz(parse, cekme_poly, kimlik, alan_m2, cekme_degerleri, out_dir, ba
                                                _tr(cekme_degerleri[2], 1)))
     else:
         satirlar.append("CEKME SINIRI CIZILEMEDI (offset gecersiz)")
-    for s_ in satirlar:
-        ent.append({"tip": "text", "katman": "KROKI", "x": (min(xs) + max(xs)) / 2, "y": y,
-                    "yazi": s_, "h": h_txt * 0.8})
-        y -= h_txt * 1.4
-    ent += kuzey_oku(max(xs) + ofs * 2.2, max(ys) - h_txt, h_txt * 0.8)
-    ent += olcek_cubugu(min(xs) - ofs * 1.2, min(ys) - h_txt * 11, 20.0, "20 m", h_txt * 0.7)
+    # tuval: icerik %88, baslik bandi %12 (banda gore yazi boyu)
+    H = (ic_h + gap) / 0.88
+    band = H - (ic_h + gap)
+    h_baslik = min(h_txt * 0.8, band / (len(satirlar) * 1.45 + 0.6))
+    y_alt = kb[1] - gap - band
 
+    x_orta = (kb[0] + kb[2]) / 2.0
+    y = kb[1] - gap - 0.75 * h_baslik
+    for s_ in satirlar:
+        ent.append({"tip": "text", "katman": "KROKI", "x": x_orta, "y": y,
+                    "yazi": s_, "h": h_baslik})
+        y -= 1.45 * h_baslik
+
+    sinir = (kb[0] - pad, y_alt - pad, kb[2] + pad, kb[3] + pad)
     os.makedirs(out_dir, exist_ok=True)
-    svg = svg_yaz(os.path.join(out_dir, "parsel.svg"), ent, "%s - %s" % (baslik, kimlik))
+    svg = svg_yaz(os.path.join(out_dir, "parsel.svg"), ent, "%s - %s" % (baslik, kimlik), sinir=sinir)
     png = os.path.join(out_dir, "parsel.png")
     arac = png_uret(svg, png)
-    return {"svg": svg, "png": png if arac else None, "png_arac": arac}
+    return {"svg": svg, "png": png if arac else None, "png_arac": arac,
+            "band_orani": round(band / (sinir[3] - sinir[1]), 3),
+            "band_ust": round(y_alt, 3),
+            "liderler": liderler,
+            "sinir": [round(v, 2) for v in sinir]}
+
+

@@ -168,6 +168,17 @@ def test_cizim():
           svg.count("<text") >= len(tm), svg.count("<text"))
     check("PNG: cekme cizgisi yalniz gecerli offsette",
           (cekme is not None) == ('class="cekme"' in svg), (cekme is not None))
+    check("PNG: baslik bandi ~%12", 0.10 <= (resim.get("band_orani") or 0) <= 0.155,
+          resim.get("band_orani"))
+
+    # kisa kenarli sentetik parsel: liderler kenara bagli mi
+    kisa = [(0, 0), (10, 0), (10, 10), (8, 10), (8, 9.2), (6, 9.2), (6, 10), (0, 10)]
+    r2 = cizim.vaziyet_ciz(kisa, None, "0/0", 95.0, (None, None, None), out)
+    ok, kotu = _lider_kontrol(r2.get("liderler"), kisa)
+    check("lider: kisa kenarlar icin lider var ve kenara bagli",
+          len(r2.get("liderler") or []) >= 2 and ok, (len(r2.get("liderler") or []), kotu))
+    ayrik, en_alt = _etiketler_bandin_ustunde(resim["svg"], resim["sinir"], resim["band_ust"])
+    check("PNG: olcu etiketleri baslik bandina girmiyor", ayrik, en_alt)
 
 
 def test_ozet_pdf_ve_birlestirme():
@@ -212,6 +223,37 @@ def test_ozet_pdf_ve_birlestirme():
 
     md = rapor.rapor_md(veri)
     check("rapor.md: baslik + uyari", "Parsel bilgi paketi" in md and "ruhsata esas" in md.lower(), md[:80])
+
+
+def _etiketler_bandin_ustunde(svg_path, sinir, band_ust):
+    """SVG'deki olcu etiketlerinin (translate y) bandin ustunde kaldigini kontrol eder."""
+    import re
+    svg = open(svg_path, encoding="utf-8").read()
+    ys = [sinir[3] - float(m.group(2)) for m in
+          re.finditer(r'<g transform="translate\(([-\d.]+),([-\d.]+)\)', svg)]
+    return (all(y > band_ust for y in ys), min(ys) if ys else None)
+
+
+def _nokta_kenar_mesafe(pt, poly):
+    def seg(p, a, b):
+        ax, ay = a
+        bx, by = b
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-12:
+            return ((p[0] - ax) ** 2 + (p[1] - ay) ** 2) ** 0.5
+        t = max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2))
+        return ((p[0] - (ax + t * dx)) ** 2 + (p[1] - (ay + t * dy)) ** 2) ** 0.5
+    return min(seg(pt, poly[i], poly[(i + 1) % len(poly)]) for i in range(len(poly)))
+
+
+def _lider_kontrol(liderler, poly):
+    """Her liderin baslangici poligon kenari uzerinde mi (<0,5 m) ve<= 8 m mi."""
+    if not liderler:
+        return True, "lider yok"
+    kotu = [l for l in liderler
+            if _nokta_kenar_mesafe(l["baslangic"], poly) > 0.5 or l["kenar_m"] > 8.0]
+    return (not kotu), kotu[:3]
 
 
 def _pdf_metrik(path):
@@ -340,13 +382,29 @@ def run_online():
         err, t = cagir("liste", {"tur": "il"})
         check("liste(tur=il) 81", not err and len(t.get("iller") or []) == 81, len(t.get("iller") or []))
 
-        err, t = cagir("cizim", {"il": "Rize", "ilce": "Merkez", "mahalle": "Tophane",
-                                 "ada": "157", "parsel": "59"})
-        check("cizim: dxf", not err and os.path.exists(t.get("dxf", "")), t.get("dxf"))
-        if (t or {}).get("png"):
-            check("cizim: png >=1200", png_boyut(t["png"])[0] >= 1200, t["png"])
-        else:
-            print("SKIP  cizim png (cairosvg yok)")
+        for _mah, _ada, _parsel in (("Tophane", "157", "59"), ("Çarşı", "15", "4")):
+            err, t = cagir("cizim", {"il": "Rize", "ilce": "Merkez", "mahalle": _mah,
+                                     "ada": _ada, "parsel": _parsel})
+            check("cizim %s/%s: dxf" % (_ada, _parsel),
+                  not err and os.path.exists(t.get("dxf", "")), t.get("dxf"))
+            check("cizim %s/%s: png >=1200" % (_ada, _parsel),
+                  bool(t.get("png")) and png_boyut(t["png"])[0] >= 1200, (t or {}).get("png"))
+            check("cizim %s/%s: baslik bandi ~%%12" % (_ada, _parsel),
+                  0.10 <= (t.get("band_orani") or 0) <= 0.155, t.get("band_orani"))
+            ayrik, en_alt = _etiketler_bandin_ustunde(t.get("svg", ""), t.get("sinir") or [0, 0, 0, 0],
+                                                      t.get("band_ust") or 0)
+            check("cizim %s/%s: etiketler bandin ustunde" % (_ada, _parsel), ayrik, en_alt)
+            _e2, _pv = cagir("parsel", {"il": "Rize", "ilce": "Merkez", "mahalle": _mah,
+                                        "ada": _ada, "parsel": _parsel})
+            _gj = (_pv or {}).get("geojson_dosya")
+            if t.get("liderler") and _gj and os.path.exists(_gj):
+                _feat = json.load(open(_gj, encoding="utf-8"))
+                _poly, _l0, _eps = srv._proj(_feat)
+                ok, kotu = _lider_kontrol(t["liderler"], _poly)
+                check("cizim %s/%s: liderler kenara bagli (<=0,5 m)" % (_ada, _parsel),
+                      ok, kotu)
+            print("      %s/%s band %.3f | etiket alt sinir %s" % (_ada, _parsel,
+                  t.get("band_orani") or 0, en_alt))
 
         for il, ilce, mah, ada, parsel in (("Rize", "Merkez", "Tophane", "157", "59"),
                                            ("Aksaray", "Merkez", "Kılıçarslan", "668", "214")):

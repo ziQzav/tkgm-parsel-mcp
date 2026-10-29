@@ -1007,6 +1007,8 @@ def tool_cizim(args):
             "png_arac": resim.get("png_arac"),
             "cekim": {"uygulanan_m": round(uygulanan, 2), "limit_m": d,
                       "cizildi": bool(cekme_poly)},
+            "band_orani": resim.get("band_orani"), "band_ust": resim.get("band_ust"),
+            "sinir": resim.get("sinir"), "liderler": resim.get("liderler"),
             "epsg": epsg, "merkez_boylam": lon0,
             "uyarilar": ([] if cekme_poly else ["Çekme sınırı çizilemedi (offset geçersiz)."]),
             "zaman": _ts()}
