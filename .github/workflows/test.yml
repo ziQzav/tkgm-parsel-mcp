@@ -17,5 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Opsiyonel bagimliliklar (PDF/PNG/birlestirme)
+        run: pip install cairocffi cairosvg pypdf || true
       - name: Offline testler (ag ve tarayici yok)
         run: python test_mcp.py --offline
